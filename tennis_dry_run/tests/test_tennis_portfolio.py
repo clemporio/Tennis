@@ -266,6 +266,27 @@ def test_today_settlements_empty():
     assert "_No settlements today._" in out
 
 
+def test_open_picks_block_skips_pick_without_sxbet_odds():
+    """Legacy state.json entries without sxbet_odds should be silently skipped, not crash."""
+    open_picks = {
+        "0xlegacy": {
+            "pick_id": "0xlegacy", "pick": "Legacy Pick",
+            "opponent": "Mystery", "league": "?",
+            # no sxbet_odds key — written by old version of bot
+            "model_prob": 0.85, "edge": 0.10,
+            "ts": "2026-05-01T10:00:00+00:00",
+        }
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)
+    # Doesn't crash; renders empty table or skips the row
+    assert "Legacy Pick" not in out
+
+
 def test_today_settlements_winning():
     settlements = [{
         "pick_id": "0xdjk",

@@ -415,8 +415,12 @@ def main() -> int:
         else:
             counts["immediate"] += 1
         persist_selection(selection, outcome, pending_file)
+        game_time_iso = datetime.fromtimestamp(
+            selection["game_time"], tz=timezone.utc
+        ).isoformat()
         selections_for_report.append({
             **selection,
+            "game_time_iso": game_time_iso,
             "placement_path": outcome["placement_path"],
             "scheduled_at_iso": outcome.get("scheduled_at_iso"),
         })

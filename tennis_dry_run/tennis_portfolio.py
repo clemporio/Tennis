@@ -31,6 +31,7 @@ def render_portfolio_block(
     now_utc: datetime,
     *,
     base_stake_usd: float = 25.0,
+    starting_balance: float = 500.0,
 ) -> str:
     """Render the Portfolio table — 3 columns (Base / 1/4 K / 1/2 K).
 
@@ -38,6 +39,7 @@ def render_portfolio_block(
         replay: output of tennis_kelly.replay_three_bankrolls
         now_utc: timestamp shown in the header
         base_stake_usd: flat base stake (shown in "Today's Stake" row)
+        starting_balance: initial bankroll shown in the "Starting" row
     """
     b = replay["base"]
     q = replay["quarter_kelly"]
@@ -53,7 +55,7 @@ def render_portfolio_block(
         "| Metric          | Base    | ¼ Kelly | ½ Kelly |",
         "|---|---:|---:|---:|",
         _row("Balance",       _money_abs(b["balance"]),       _money_abs(q["balance"]),       _money_abs(h["balance"])),
-        _row("Starting",      _money_abs(500.0),              _money_abs(500.0),              _money_abs(500.0)),
+        _row("Starting",      _money_abs(starting_balance),   _money_abs(starting_balance),   _money_abs(starting_balance)),
         _row("Total P&L",     _money(b["total_pnl"]),         _money(q["total_pnl"]),         _money(h["total_pnl"])),
         _row("Today P&L",     _money(b["today_pnl"]),         _money(q["today_pnl"]),         _money(h["today_pnl"])),
         _row("Today ROI",     _pct(b["today_roi_pct"]),       _pct(q["today_roi_pct"]),       _pct(h["today_roi_pct"])),
@@ -86,8 +88,14 @@ def render_open_picks_block(open_picks: dict, replay: dict) -> str:
         "|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for pick_id, p in open_picks.items():
-        prob = float(p["model_prob"])
-        odds = float(p["sxbet_odds"])
+        odds_raw = p.get("sxbet_odds")
+        if odds_raw is None:
+            continue  # skip picks missing odds (legacy state.json entries)
+        odds = float(odds_raw)
+        prob_raw = p.get("model_prob")
+        if prob_raw is None:
+            continue  # skip picks missing model_prob (legacy state.json entries)
+        prob = float(prob_raw)
         avail = float(p.get("sxbet_available_usd", 0.0))
         edge = float(p.get("edge", prob - 1.0 / odds))
         match_time = p.get("ts", "")[:19].replace("T", " ")
@@ -177,13 +185,6 @@ def render_closed_trades_block(
         )
     lines.append("")
     return "\n".join(lines)
-
-
-def _profit_factor(wins_sum: float, losses_sum: float) -> str:
-    """profit factor = sum(wins) / |sum(losses)|. Render '∞' on no losses."""
-    if losses_sum == 0:
-        return "∞" if wins_sum > 0 else "n/a"
-    return f"{wins_sum / abs(losses_sum):.2f}"
 
 
 def render_performance_block(replay: dict) -> str:
