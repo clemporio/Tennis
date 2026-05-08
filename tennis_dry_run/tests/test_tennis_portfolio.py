@@ -124,3 +124,54 @@ def test_closed_trades_block_respects_n_limit():
     assert "2026-05-05" in out  # newest two: 05 and 04
     assert "2026-05-04" in out
     assert "2026-05-01" not in out
+
+
+from tennis_portfolio import render_performance_block, render_backtest_comparison_block
+
+
+def test_performance_block_zero_trades():
+    replay = replay_three_bankrolls(settled_trades=[], placed_trades=[])
+    out = render_performance_block(replay)
+    assert "_No closed trades yet._" in out or "| Total trades      | 0" in out
+
+
+def test_performance_block_with_one_win():
+    placed = [_open("djk", "2026-05-08T11:55:00+00:00")]
+    settled = [_settled("djk", "2026-05-08T15:00:00+00:00", won=True, pnl=12.38)]
+    replay = replay_three_bankrolls(settled, placed)
+    out = render_performance_block(replay)
+    assert "Total trades" in out
+    assert " 1 " in out  # the count
+    assert "100.00%" in out  # win rate
+    # avg pnl base = 12.38 / 1 = 12.38
+    assert "$+12.38" in out
+
+
+def test_performance_block_mixed():
+    placed = [
+        _open("a", "2026-05-08T10:00:00+00:00"),
+        _open("b", "2026-05-08T11:00:00+00:00"),
+        _open("c", "2026-05-08T12:00:00+00:00"),
+    ]
+    settled = [
+        _settled("a", "2026-05-08T15:00:00+00:00", won=True,  pnl=12.38),
+        _settled("b", "2026-05-08T16:00:00+00:00", won=False, pnl=-25.0),
+        _settled("c", "2026-05-08T17:00:00+00:00", won=True,  pnl=12.38),
+    ]
+    replay = replay_three_bankrolls(settled, placed)
+    out = render_performance_block(replay)
+    assert "Total trades" in out
+    assert " 3 " in out
+    assert "66.67%" in out  # 2/3 win rate
+    assert "2 / 1" in out   # wins / losses
+
+
+def test_backtest_comparison_block():
+    placed = [_open("a", "2026-05-08T10:00:00+00:00")]
+    settled = [_settled("a", "2026-05-08T15:00:00+00:00", won=True, pnl=12.38)]
+    replay = replay_three_bankrolls(settled, placed)
+    out = render_backtest_comparison_block(replay)
+    assert "Backtest" in out
+    assert "87.4%" in out  # backtest win rate
+    assert "11,161" in out  # backtest sample size
+    assert "100.00%" in out  # actual base win rate

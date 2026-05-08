@@ -177,3 +177,67 @@ def render_closed_trades_block(
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _profit_factor(wins_sum: float, losses_sum: float) -> str:
+    """profit factor = sum(wins) / |sum(losses)|. Render '∞' on no losses."""
+    if losses_sum == 0:
+        return "∞" if wins_sum > 0 else "n/a"
+    return f"{wins_sum / abs(losses_sum):.2f}"
+
+
+def render_performance_block(replay: dict) -> str:
+    """Render cumulative performance table (Base / 1/4 K / 1/2 K)."""
+    b, q, h = replay["base"], replay["quarter_kelly"], replay["half_kelly"]
+
+    total = b["wins"] + b["losses"]
+    if total == 0:
+        return "### Performance (cumulative)\n\n_No closed trades yet._\n"
+
+    win_rate = (b["wins"] / total) * 100.0
+
+    avg_b = b["total_pnl"] / total
+    avg_q = q["total_pnl"] / total
+    avg_h = h["total_pnl"] / total
+
+    lines = [
+        "### Performance (cumulative)",
+        "",
+        "| Metric            | Base    | ¼ Kelly | ½ Kelly |",
+        "|---|---:|---:|---:|",
+        _row("Total trades",     str(total),                   str(total),                   str(total)),
+        _row("Wins / Losses",    f"{b['wins']} / {b['losses']}", f"{b['wins']} / {b['losses']}", f"{b['wins']} / {b['losses']}"),
+        _row("Win rate",         f"{win_rate:.2f}%",           f"{win_rate:.2f}%",           f"{win_rate:.2f}%"),
+        _row("Avg P&L/trade",    _money(avg_b),                _money(avg_q),                _money(avg_h)),
+        _row("Total P&L",        _money(b["total_pnl"]),       _money(q["total_pnl"]),       _money(h["total_pnl"])),
+        _row("Max drawdown",     f"{b['drawdown_pct']:.2f}%",  f"{q['drawdown_pct']:.2f}%",  f"{h['drawdown_pct']:.2f}%"),
+        _row("Liquidity-capped", str(b["capped_count"]),       str(q["capped_count"]),       str(h["capped_count"])),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_backtest_comparison_block(replay: dict) -> str:
+    """Render backtest-vs-actual comparison table.
+
+    Backtest reference values come from the optimal filter config and
+    walk-forward results: 87.4% SR, PF 4.40, 11,161 sampled matches at
+    the 80%+ confidence + odds<=2.00 threshold.
+    """
+    b = replay["base"]
+    total = b["wins"] + b["losses"]
+    if total == 0:
+        actual_wr_base = "n/a"
+    else:
+        actual_wr_base = f"{(b['wins'] / total) * 100.0:.2f}%"
+
+    lines = [
+        "### Backtest vs Dry Run",
+        "",
+        "| Metric          | Backtest | Base    | ¼ Kelly | ½ Kelly |",
+        "|---|---:|---:|---:|---:|",
+        f"| Win rate        | 87.4%    | {actual_wr_base:>7} | {actual_wr_base:>7} | {actual_wr_base:>7} |",
+        f"| Sample size     | 11,161   | {total:>7} | {total:>7} | {total:>7} |",
+        "",
+    ]
+    return "\n".join(lines)
