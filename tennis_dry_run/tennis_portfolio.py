@@ -6,7 +6,6 @@ Pure functions — given replay output and inputs, return strings.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable
 
 
 def _money(v: float) -> str:
@@ -65,4 +64,116 @@ def render_portfolio_block(
         _row("Today's Stake", _money_abs(base_stake_usd),     _money_abs(qk_today_max),       _money_abs(hk_today_max)),
         "",
     ]
+    return "\n".join(lines)
+
+
+def render_open_picks_block(open_picks: dict, replay: dict) -> str:
+    """Render currently-open picks table (one row per state.open_picks entry).
+
+    Stake columns show what each mode would have committed at placement,
+    using each mode's current today_start_balance from the replay output
+    as the locked stake.
+    """
+    if not open_picks:
+        return "### Open Picks (0)\n\n_No open picks._\n"
+
+    from tennis_kelly import day_start_stake
+
+    lines = [
+        f"### Open Picks ({len(open_picks)})",
+        "",
+        "| Pick | Opponent | Match (UTC) | League | Entry odds | Edge | Base | ¼K | ½K |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for pick_id, p in open_picks.items():
+        prob = float(p["model_prob"])
+        odds = float(p["sxbet_odds"])
+        avail = float(p.get("sxbet_available_usd", 0.0))
+        edge = float(p.get("edge", prob - 1.0 / odds))
+        match_time = p.get("ts", "")[:19].replace("T", " ")
+
+        base = day_start_stake(
+            mode="base", base_stake=25.0, kelly_multiplier=0.0,
+            day_start_balance=replay["base"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+        qk = day_start_stake(
+            mode="quarter_kelly", base_stake=25.0, kelly_multiplier=0.25,
+            day_start_balance=replay["quarter_kelly"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+        hk = day_start_stake(
+            mode="half_kelly", base_stake=25.0, kelly_multiplier=0.5,
+            day_start_balance=replay["half_kelly"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+
+        edge_sign = "+" if edge >= 0 else "-"
+        lines.append(
+            f"| {p.get('pick','?')} | {p.get('opponent','?')} | {match_time} | "
+            f"{p.get('league','?')} | {odds:.3f} | {edge_sign}{abs(edge*100):.1f}% | "
+            f"{_money_abs(base['stake'])} | {_money_abs(qk['stake'])} | "
+            f"{_money_abs(hk['stake'])} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_closed_trades_block(
+    settled: list[dict],
+    placed: list[dict],
+    n: int = 30,
+) -> str:
+    """Render the most recent `n` settled trades, newest first.
+
+    For each settled row, look up the matching placed row by pick_id to
+    pull entry odds + stake. Per-mode P&L for display approximates Kelly
+    stakes using starting balance ($500); canonical numbers come from
+    the Performance block via the replay output.
+    """
+    if not settled:
+        return "### Closed Trades (0)\n\n_No closed trades yet._\n"
+
+    placed_by_id = {p["pick_id"]: p for p in placed}
+    rows = []
+    for s in settled:
+        pid = s["pick_id"]
+        p = placed_by_id.get(pid)
+        if p is None:
+            continue
+        ts = s.get("ts", "")[:10]
+        odds = float(p["sxbet_odds"])
+        won = bool(s.get("won", False))
+        base_stake = float(p.get("stake", 25.0))
+        b_pnl = base_stake * (odds - 1.0) if won else -base_stake
+        rows.append((ts, p, s, odds, won, b_pnl))
+
+    rows.sort(key=lambda r: r[0], reverse=True)
+    rows = rows[:n]
+
+    from tennis_kelly import kelly_fraction
+
+    lines = [
+        f"### Closed Trades (last {min(n, len(rows))}, newest first)",
+        "",
+        "| Date | Pick | Opponent | Entry odds | Outcome | Base P&L | ¼K P&L | ½K P&L | Result |",
+        "|---|---|---|---:|---|---:|---:|---:|---|",
+    ]
+    for ts, p, s, odds, won, b_pnl in rows:
+        result = "WIN" if won else "LOSS"
+        outcome = "✓" if won else "✗"
+        prob = float(p["model_prob"])
+        f = kelly_fraction(prob=prob, decimal_odds=odds)
+        avail = float(p.get("sxbet_available_usd", 0.0))
+        qk_stake = min(0.25 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        hk_stake = min(0.5 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        qk_pnl = qk_stake * (odds - 1.0) if won else -qk_stake
+        hk_pnl = hk_stake * (odds - 1.0) if won else -hk_stake
+
+        lines.append(
+            f"| {ts} | {p.get('pick','?')} | {p.get('opponent','?')} | "
+            f"{odds:.3f} | {outcome} | "
+            f"{_money(b_pnl)} | {_money(qk_pnl)} | {_money(hk_pnl)} | {result} |"
+        )
+    lines.append("")
     return "\n".join(lines)
