@@ -193,41 +193,57 @@ def test_schedule_or_place_invokes_placer_immediately_when_under_lead_min():
     assert "at" not in cmd
 
 
-# ── write_vault_report ────────────────────────────────────────────────────────
+# ── write_daily_report ────────────────────────────────────────────────────────
 
-def test_write_vault_report_creates_dated_file_with_summary_and_selections(tmp_path):
+def _make_state_dir(tmp_path, subdir="state"):
+    """Helper: create a minimal state_dir with empty state.json + trades.jsonl."""
+    state_dir = tmp_path / subdir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+    return state_dir
+
+
+def test_write_daily_report_creates_dated_file_with_summary_and_selections(tmp_path):
     """Daily report written to <vault_dir>/YYYY-MM-DD.md with frontmatter,
-    counts table, and one row per selection."""
+    counts table, portfolio block, and one row per selection."""
     now = datetime(2026, 5, 7, 7, 0, 0, tzinfo=timezone.utc)
     counts = {"qualified": 2, "scheduled": 1, "immediate": 1,
               "skipped_dedup": 0, "skipped_filter": 5}
     selections = [
         {
             "pick": "Aryna Sabalenka", "opponent": "Magda Linette",
-            "league": "WTA Madrid", "surface": "clay", "round": "R32",
-            "model_prob": 0.85, "fair_odds": 1.176, "pick_id": "0xabc",
-            "game_time": _ts(2026, 5, 7, 14),
-            "_placement_path": "scheduled",
-            "_scheduled_at_iso": "2026-05-07T13:45:00+00:00",
+            "league": "WTA Madrid", "surface": "clay",
+            "model_prob": 0.85, "fair_odds": 1.176,
+            "sxbet_odds": 1.45, "sxbet_available_usd": 50.0,
+            "edge": 0.18,
+            "game_time_iso": "2026-05-07T14:00:00+00:00",
+            "placement_path": "scheduled",
+            "scheduled_at_iso": "2026-05-07T13:45:00+00:00",
         },
         {
             "pick": "Carlos Alcaraz", "opponent": "Random Player",
-            "league": "ATP Rome", "surface": "clay", "round": "R64",
-            "model_prob": 0.91, "fair_odds": 1.099, "pick_id": "0xdef",
-            "game_time": _ts(2026, 5, 7, 7, 10),
-            "_placement_path": "immediate",
-            "_scheduled_at_iso": None,
+            "league": "ATP Rome", "surface": "clay",
+            "model_prob": 0.91, "fair_odds": 1.099,
+            "sxbet_odds": 1.25, "sxbet_available_usd": 30.0,
+            "edge": 0.14,
+            "game_time_iso": "2026-05-07T07:10:00+00:00",
+            "placement_path": "immediate",
+            "scheduled_at_iso": None,
         },
     ]
     markets_total = 95
     markets_today = 7
+    state_dir = _make_state_dir(tmp_path)
+    vault_dir = tmp_path / "vault"
 
-    ti.write_vault_report(now, counts, selections, markets_total, markets_today, tmp_path)
+    ti.write_daily_report(now, counts, selections, markets_total, markets_today,
+                          vault_dir=vault_dir, state_dir=state_dir)
 
-    report = tmp_path / "2026-05-07.md"
+    report = vault_dir / "2026-05-07.md"
     assert report.exists()
     body = report.read_text(encoding="utf-8")
-    assert "type: identifier-report" in body
+    assert "type: tennis-daily-report" in body
     assert "date: 2026-05-07" in body
     assert "Qualified" in body
     assert "Markets total" in body and "95" in body
@@ -235,25 +251,30 @@ def test_write_vault_report_creates_dated_file_with_summary_and_selections(tmp_p
     assert "Carlos Alcaraz" in body
     assert "scheduled" in body
     assert "immediate" in body
+    assert "### Portfolio" in body
 
 
-def test_write_vault_report_overwrites_when_called_twice_same_day(tmp_path):
+def test_write_daily_report_overwrites_when_called_twice_same_day(tmp_path):
     """Re-running the identifier on the same UTC date overwrites the file
     rather than duplicating content."""
     now = datetime(2026, 5, 7, 7, 0, 0, tzinfo=timezone.utc)
     base_counts = {"qualified": 0, "scheduled": 0, "immediate": 0,
                    "skipped_dedup": 0, "skipped_filter": 0}
+    state_dir = _make_state_dir(tmp_path)
+    vault_dir = tmp_path / "vault"
 
-    ti.write_vault_report(now, base_counts, [], 50, 0, tmp_path)
-    first = (tmp_path / "2026-05-07.md").read_text(encoding="utf-8")
+    ti.write_daily_report(now, base_counts, [], 50, 0,
+                          vault_dir=vault_dir, state_dir=state_dir)
+    first = (vault_dir / "2026-05-07.md").read_text(encoding="utf-8")
 
     later_counts = {**base_counts, "qualified": 3}
-    ti.write_vault_report(now, later_counts, [], 50, 0, tmp_path)
-    second = (tmp_path / "2026-05-07.md").read_text(encoding="utf-8")
+    ti.write_daily_report(now, later_counts, [], 50, 0,
+                          vault_dir=vault_dir, state_dir=state_dir)
+    second = (vault_dir / "2026-05-07.md").read_text(encoding="utf-8")
 
     assert first != second
     # File length doesn't double; only one report worth of content.
-    assert second.count("# Tennis Identifier Report") == 1
+    assert second.count("# Tennis Daily Report") == 1
 
 
 # ── persist_selection ─────────────────────────────────────────────────────────
@@ -311,3 +332,51 @@ def test_evaluate_market_skips_when_fair_odds_below_min():
                                 state=state, now_utc=now)
 
     assert result is None
+
+
+# ── write_daily_report ────────────────────────────────────────────────────────
+
+def test_identifier_writes_portfolio_block_to_daily_file(tmp_path):
+    """The new BOD section must include the Portfolio block + Identified Picks."""
+    from tennis_identifier import write_daily_report
+
+    selections = [{
+        "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
+        "league": "ATP Rome", "surface": "clay",
+        "model_prob": 0.8713, "fair_odds": 1.148,
+        "sxbet_odds": 1.5534, "sxbet_available_usd": 39.05,
+        "edge": 0.226,
+        "game_time_iso": "2026-05-08T12:10:00+00:00",
+        "placement_path": "scheduled",
+        "scheduled_at_iso": "2026-05-08T11:55:00+00:00",
+    }]
+    counts = {"qualified": 1, "scheduled": 1, "immediate": 0,
+              "skipped_dedup": 0, "skipped_filter": 0}
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+    rolling_path = tmp_path / "rolling.md"
+
+    from datetime import datetime, timezone
+    out = write_daily_report(
+        now_utc=datetime(2026, 5, 8, 7, 0, tzinfo=timezone.utc),
+        counts=counts,
+        selections=selections,
+        markets_total=73, markets_today=47,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+        rolling_path=rolling_path,
+    )
+
+    body = out.read_text(encoding="utf-8")
+    assert "### Portfolio (snapshot 2026-05-08 07:00 UTC)" in body
+    assert "Novak Djokovic" in body
+    assert "1.553" in body
+    assert "$39.05" in body
+    rolling = rolling_path.read_text(encoding="utf-8")
+    assert "## Tennis Dry Run Report" in rolling
+    assert "### Portfolio" in rolling
