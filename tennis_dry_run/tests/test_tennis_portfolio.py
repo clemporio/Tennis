@@ -175,3 +175,43 @@ def test_backtest_comparison_block():
     assert "87.4%" in out  # backtest win rate
     assert "11,161" in out  # backtest sample size
     assert "100.00%" in out  # actual base win rate
+
+
+from tennis_portfolio import render_identified_picks_block
+
+
+def test_identified_picks_block_empty():
+    out = render_identified_picks_block(selections=[])
+    assert "_No qualifying selections today._" in out
+
+
+def test_identified_picks_block_with_real_odds():
+    selections = [
+        {
+            "pick": "Iga Swiatek", "opponent": "Catherine McNally",
+            "league": "WTA Rome", "surface": "clay",
+            "model_prob": 0.8848, "fair_odds": 1.130,
+            "sxbet_odds": None,            # no liquidity at 07:00
+            "sxbet_available_usd": None,
+            "edge": None,
+            "game_time_iso": "2026-05-08T09:00:00+00:00",
+            "placement_path": "scheduled", "scheduled_at_iso": "2026-05-08T08:45:00+00:00",
+        },
+        {
+            "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
+            "league": "ATP Rome", "surface": "clay",
+            "model_prob": 0.8713, "fair_odds": 1.148,
+            "sxbet_odds": 1.5534,
+            "sxbet_available_usd": 39.05,
+            "edge": 0.226,
+            "game_time_iso": "2026-05-08T12:10:00+00:00",
+            "placement_path": "scheduled", "scheduled_at_iso": "2026-05-08T11:55:00+00:00",
+        },
+    ]
+    out = render_identified_picks_block(selections)
+    assert "Iga Swiatek" in out
+    assert "Catherine McNally" in out
+    assert "1.553" in out  # Djokovic
+    assert "+22.60%" in out
+    assert "$39.05" in out
+    assert "—" in out  # Swiatek's blank cells

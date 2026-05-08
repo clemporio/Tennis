@@ -241,3 +241,46 @@ def render_backtest_comparison_block(replay: dict) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def render_identified_picks_block(selections: list[dict]) -> str:
+    """Render the BOD 'Identified Picks' table (qualified picks only).
+
+    Args:
+        selections: list of dicts with keys pick, opponent, league,
+            surface, model_prob, fair_odds, sxbet_odds (None if no
+            liquidity), sxbet_available_usd, edge, game_time_iso,
+            placement_path, scheduled_at_iso.
+    """
+    if not selections:
+        return "## Identified Picks\n\n_No qualifying selections today._\n"
+
+    lines = [
+        "## Identified Picks",
+        "",
+        "| Pick | Opponent | League | Surface | Model Prob | Fair Odds | "
+        "SX Bet @07:00 | Edge | Liquidity | Match (UTC) | Placement |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---|---|",
+    ]
+    for s in selections:
+        sx = s.get("sxbet_odds")
+        avail = s.get("sxbet_available_usd")
+        edge = s.get("edge")
+        match_time = (s.get("game_time_iso") or "")[:16].replace("T", " ")
+        sched = (s.get("scheduled_at_iso") or "")[11:16]
+        placement = s.get("placement_path", "?")
+        if placement == "scheduled" and sched:
+            placement = f"scheduled {sched}"
+
+        lines.append(
+            f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+            f"{s.get('league','?')} | {s.get('surface','?')} | "
+            f"{float(s.get('model_prob', 0)):.4f} | "
+            f"{float(s.get('fair_odds', 0)):.3f} | "
+            f"{(f'{sx:.3f}' if sx else '—'):>5} | "
+            f"{(_pct(edge*100) if edge is not None else '—'):>7} | "
+            f"{(_money_abs(avail) if avail else '—'):>9} | "
+            f"{match_time} | {placement} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
