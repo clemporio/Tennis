@@ -1,0 +1,102 @@
+{
+  "version": "v1.0",
+  "architecture": "lgbm_binary",
+  "feature_names": [
+    "ace_rate_diff",
+    "age_diff",
+    "age_surface_interaction",
+    "bp_converted_diff",
+    "bp_saved_diff",
+    "df_rate_diff",
+    "elo_diff",
+    "exp_diff",
+    "fatigue_matches14d_diff",
+    "fatigue_matches7d_diff",
+    "fatigue_sets14d_diff",
+    "first_in_diff",
+    "first_won_diff",
+    "form10_diff",
+    "form20_diff",
+    "form5_diff",
+    "hand_matchup",
+    "height_diff",
+    "hold_pct_diff",
+    "ix_elo_diff_x_surface_wr_diff",
+    "ix_hold_pct_diff_x_bp_converted_diff",
+    "pa_days_since_last",
+    "pa_form5",
+    "pa_is_qualifier",
+    "pa_is_wildcard",
+    "pa_rank_implied_prob",
+    "pa_surface_exp",
+    "pb_days_since_last",
+    "pb_form5",
+    "pb_is_qualifier",
+    "pb_is_wildcard",
+    "pb_surface_exp",
+    "prev_round_minutes_diff",
+    "prev_round_sets_diff",
+    "qa_form_diff",
+    "qualifier_diff",
+    "rank_diff",
+    "rank_momentum_diff",
+    "rest_diff_norm",
+    "return_pts_diff",
+    "second_won_diff",
+    "surface_elo_diff",
+    "surface_form_diff",
+    "surface_wr_diff"
+  ],
+  "feature_count": 44,
+  "params": {
+    "num_leaves": 31,
+    "learning_rate": 0.01,
+    "min_child_samples": 75,
+    "max_depth": -1,
+    "lambda_l1": 0.5,
+    "lambda_l2": 1.0,
+    "feature_fraction": 0.5,
+    "bagging_fraction": 0.85
+  },
+  "accuracy": 0.6471,
+  "auc": 0.7075,
+  "logloss": 0.6219,
+  "best_iteration": 1251,
+  "train_end": "20210301",
+  "val_end": "20230821",
+  "test_samples": 8132,
+  "train_samples": 49318,
+  "data_years": "2010-2026",
+  "tours": "atp+wta",
+  "created_at": "2026-04-06T19:22:52.000568",
+  "confidence_tiers": {
+    ">=55%": {
+      "accuracy": 0.6703,
+      "picks": 6815
+    },
+    ">=60%": {
+      "accuracy": 0.7003,
+      "picks": 5446
+    },
+    ">=65%": {
+      "accuracy": 0.7353,
+      "picks": 4171
+    },
+    ">=70%": {
+      "accuracy": 0.7684,
+      "picks": 2914
+    },
+    ">=75%": {
+      "accuracy": 0.8134,
+      "picks": 1801
+    },
+    ">=80%": {
+      "accuracy": 0.8772,
+      "picks": 863
+    },
+    ">=85%": {
+      "accuracy": 0.9519,
+      "picks": 291
+    }
+  }
+}

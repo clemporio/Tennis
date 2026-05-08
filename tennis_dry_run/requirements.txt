@@ -1,0 +1,6 @@
+lightgbm
+joblib
+numpy
+requests
+beautifulsoup4
+eth-account>=0.10.0

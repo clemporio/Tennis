@@ -1,0 +1,405 @@
+"""Tennis identifier — morning one-shot that schedules per-pick placers.
+
+Runs once daily (cron 07:00 UTC by default). Fetches today's SX Bet match-
+winner markets, runs the model + Elo + filter pipeline, and for each
+qualifying selection either:
+  - schedules an `at` job at (gameTime - 15 min) to invoke tennis_placer.py, OR
+  - invokes the placer synchronously when the match starts within 15 min.
+
+Late-binding the orderbook fetch to T-15 sidesteps thin-book outliers seen
+hours before kickoff. See plan: where-the-work-lives-delegated-wilkes.md.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+# Reuse helpers and constants from the scan-loop module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tennis_dry_run import (  # noqa: E402
+    ELO_FILE,
+    MAX_ODDS,
+    MIN_CONFIDENCE,
+    MIN_ODDS,
+    ROUNDS_FILTER,
+    STATE_DIR,
+    _build_model_input,
+    _detect_surface,
+    _extract_last_and_initial,
+    _find_player_elo,
+    load_state,
+    scrape_scheduled_matches,
+)
+
+log = logging.getLogger("tennis_identifier")
+
+
+def today_window(now_utc: datetime) -> tuple[datetime, datetime]:
+    """Returns (now_utc, end_of_today_utc) for filtering markets.
+
+    Args:
+        now_utc: Current UTC datetime.
+
+    Returns:
+        Tuple of (start, end) where end is 23:59:59.999999 of the same UTC date.
+    """
+    end = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return (now_utc, end)
+
+
+def filter_today_markets(markets: list[dict], now_utc: datetime) -> list[dict]:
+    """Keep only markets whose gameTime is in [now_utc, end_of_today_utc].
+
+    Args:
+        markets: Normalized market dicts with `game_time` (Unix timestamp seconds).
+        now_utc: Current UTC datetime.
+
+    Returns:
+        Subset of markets starting today and not already started.
+    """
+    start, end = today_window(now_utc)
+    start_ts = start.timestamp()
+    end_ts = end.timestamp()
+    return [m for m in markets if start_ts <= m.get("game_time", 0) <= end_ts]
+
+
+def evaluate_market(
+    market: dict,
+    elo_data: dict,
+    predictor,
+    te_round_map: dict,
+    state: dict,
+    now_utc: datetime,
+) -> Optional[dict]:
+    """Run the discovery pipeline on a single market. Returns a selection
+    dict (sufficient for placer to act on later) or None if filtered out.
+
+    Short-circuits on dedup against state.open_picks before any model work.
+    """
+    market_hash = market["market_hash"]
+    if market_hash in state.get("open_picks", {}):
+        return None
+
+    player_a = market["player_a"]
+    player_b = market["player_b"]
+    league = market.get("league", "")
+
+    surface = _detect_surface(league)
+
+    la, _ = _extract_last_and_initial(player_a)
+    lb, _ = _extract_last_and_initial(player_b)
+    round_key = tuple(sorted([la, lb]))
+    match_round = te_round_map.get(round_key, "unknown")
+    if match_round != "unknown" and match_round not in ROUNDS_FILTER:
+        return None
+
+    pa_elo = _find_player_elo(player_a, elo_data)
+    pb_elo = _find_player_elo(player_b, elo_data)
+    if not pa_elo or not pb_elo:
+        return None
+
+    pa_input = _build_model_input(pa_elo, surface)
+    pb_input = _build_model_input(pb_elo, surface)
+    call_args = dict(pa_input)
+    for k, v in pb_input.items():
+        call_args["pb_" + k[3:]] = v
+    call_args["surface"] = surface
+    pred = predictor.predict_match(**call_args)
+    if not pred:
+        return None
+
+    prob_a = pred["prob_a"]
+    prob_b = pred["prob_b"]
+
+    if prob_a >= prob_b:
+        pick_name, opponent_name, pick_prob = player_a, player_b, prob_a
+    else:
+        pick_name, opponent_name, pick_prob = player_b, player_a, prob_b
+
+    if pick_prob < MIN_CONFIDENCE:
+        return None
+
+    fair_odds = round(1.0 / pick_prob, 3)
+    if not (MIN_ODDS <= fair_odds <= MAX_ODDS):
+        return None
+
+    return {
+        "pick_id": market_hash,
+        "pick": pick_name,
+        "opponent": opponent_name,
+        "league": league,
+        "surface": surface,
+        "round": match_round,
+        "model_prob": round(pick_prob, 4),
+        "fair_odds": fair_odds,
+        "market_hash": market_hash,
+        "market_player_a": player_a,
+        "is_pick_outcome_one": pick_name.strip() == player_a.strip(),
+        "game_time": market.get("game_time"),
+        "ts": now_utc.isoformat(),
+    }
+
+
+def schedule_or_place(
+    selection: dict,
+    now_utc: datetime,
+    lead_min: int,
+    placer_cmd: list[str],
+) -> dict:
+    """Schedule the placer via `at` (lead_min before gameTime) or invoke
+    immediately if the match starts within lead_min.
+
+    Args:
+        selection: Output of `evaluate_market`. Must contain `pick_id` and `game_time`.
+        now_utc: Current UTC datetime.
+        lead_min: Minutes before gameTime to fire the placer.
+        placer_cmd: Argv prefix invoking the placer (e.g. ["python", "tennis_placer.py"]).
+                    The pick_id is appended as the final argument.
+
+    Returns:
+        Dict with `placement_path` ("scheduled" | "immediate") and `scheduled_at_iso`.
+    """
+    game_time = datetime.fromtimestamp(selection["game_time"], tz=timezone.utc)
+    fire_time = game_time - timedelta(minutes=lead_min)
+    pick_id = selection["pick_id"]
+
+    if fire_time <= now_utc:
+        cmd = list(placer_cmd) + [pick_id]
+        subprocess.run(cmd, check=False)
+        return {"placement_path": "immediate", "scheduled_at_iso": None}
+
+    fire_time_str = fire_time.strftime("%Y%m%d%H%M")
+    full_cmd = " ".join(list(placer_cmd) + [pick_id])
+    at_input = f"{full_cmd} 2>&1 | logger -t tennis-placer\n"
+    subprocess.run(["at", "-t", fire_time_str], input=at_input, text=True, check=False)
+    return {"placement_path": "scheduled", "scheduled_at_iso": fire_time.isoformat()}
+
+
+def persist_selection(
+    selection: dict,
+    schedule_outcome: dict,
+    pending_file: Path,
+) -> None:
+    """Append the selection + scheduling outcome as one JSON line."""
+    pending_file.parent.mkdir(parents=True, exist_ok=True)
+    record = {**selection, **schedule_outcome}
+    with open(pending_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+
+
+def write_vault_report(
+    now_utc: datetime,
+    counts: dict,
+    selections: list[dict],
+    markets_total: int,
+    markets_today: int,
+    vault_dir: Path,
+) -> Path:
+    """Write a daily identifier report to the Obsidian vault.
+
+    File path: `<vault_dir>/YYYY-MM-DD.md`. Overwrites if the same day's
+    file exists (idempotent across re-runs).
+    """
+    vault_dir = Path(vault_dir)
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    date_str = now_utc.strftime("%Y-%m-%d")
+    out_path = vault_dir / f"{date_str}.md"
+
+    lines: list[str] = []
+    lines.append("---")
+    lines.append(f"date: {date_str}")
+    lines.append("type: identifier-report")
+    lines.append("tags: [tennis, identifier, dry-run]")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# Tennis Identifier Report — {date_str}")
+    lines.append("")
+    lines.append(f"Run timestamp: {now_utc.isoformat()}")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Markets total | {markets_total} |")
+    lines.append(f"| Markets today | {markets_today} |")
+    lines.append(f"| Qualified | {counts.get('qualified', 0)} |")
+    lines.append(f"| Scheduled (`at`) | {counts.get('scheduled', 0)} |")
+    lines.append(f"| Placed immediately | {counts.get('immediate', 0)} |")
+    lines.append(f"| Skipped (dedup) | {counts.get('skipped_dedup', 0)} |")
+    lines.append(f"| Skipped (filter) | {counts.get('skipped_filter', 0)} |")
+    lines.append("")
+    lines.append("## Selections")
+    lines.append("")
+
+    if not selections:
+        lines.append("_No qualifying selections today._")
+    else:
+        lines.append("| Pick | Opponent | League | Surface | Round | Model Prob | Fair Odds | Game Time (UTC) | Placement | Scheduled At |")
+        lines.append("|---|---|---|---|---|---:|---:|---|---|---|")
+        for s in selections:
+            game_time_iso = (
+                datetime.fromtimestamp(s["game_time"], tz=timezone.utc).isoformat()
+                if s.get("game_time") else "—"
+            )
+            scheduled_at = s.get("_scheduled_at_iso") or "—"
+            placement = s.get("_placement_path", "—")
+            lines.append(
+                f"| {s.get('pick','')} | {s.get('opponent','')} | "
+                f"{s.get('league','')} | {s.get('surface','')} | "
+                f"{s.get('round','')} | {s.get('model_prob',0):.4f} | "
+                f"{s.get('fair_odds',0):.3f} | {game_time_iso} | "
+                f"{placement} | {scheduled_at} |"
+            )
+
+    lines.append("")
+    lines.append("---")
+    lines.append("_Generated by `tennis_identifier.py` on the LXII Capital VPS._")
+    lines.append("")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def _build_te_round_map() -> dict:
+    """Best-effort: scrape TennisExplorer to get a round map for today's matches.
+    Failures here just leave the map empty — the identifier passes through
+    "unknown" rounds (soft filter only blocks positively-identified non-target)."""
+    try:
+        te_matches = scrape_scheduled_matches()
+    except Exception as exc:
+        log.warning("TennisExplorer round scrape failed: %s", exc)
+        return {}
+
+    round_map: dict = {}
+    for m in te_matches:
+        la, _ = _extract_last_and_initial(m["player_a"])
+        lb, _ = _extract_last_and_initial(m["player_b"])
+        if not la or not lb:
+            continue
+        round_map[tuple(sorted([la, lb]))] = m.get("round", "unknown")
+    return round_map
+
+
+def main() -> int:
+    """Cron entry point. Scans today's SX Bet markets, schedules placers."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+    from tennis_sxbet import TennisSXBet
+    from tennis_model.predictor import TennisModelPredictor
+
+    lead_min = int(os.getenv("PLACEMENT_LEAD_MIN", "15"))
+    pending_file = Path(os.getenv(
+        "PENDING_SELECTIONS_FILE",
+        str(STATE_DIR / "pending_selections.jsonl"),
+    ))
+    vault_dir_env = os.getenv(
+        "OBSIDIAN_VAULT_DIR",
+        "/opt/vps-hub/vault/finance-brain/10-Projects/Tennis-Automated/Daily-Reports",
+    )
+    vault_dir = Path(vault_dir_env) if vault_dir_env else None
+
+    placer_path = Path(__file__).resolve().parent / "tennis_placer.py"
+    venv_python = os.getenv("PLACER_PYTHON", sys.executable)
+    placer_cmd = [venv_python, str(placer_path)]
+
+    now_utc = datetime.now(timezone.utc)
+    log.info("Identifier run starting at %s UTC (lead_min=%d)",
+             now_utc.isoformat(), lead_min)
+
+    sxbet = TennisSXBet()
+    try:
+        all_markets = sxbet.get_all_tennis_markets()
+    except Exception as exc:
+        log.error("Failed to fetch SX Bet markets: %s", exc)
+        return 1
+
+    today_markets = filter_today_markets(all_markets, now_utc)
+    log.info("Markets: %d total, %d today", len(all_markets), len(today_markets))
+
+    if not today_markets:
+        log.info("No markets today — exiting.")
+        return 0
+
+    elo_data: dict = {}
+    if ELO_FILE.exists():
+        try:
+            elo_data = json.loads(ELO_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("Failed to load Elo file: %s", exc)
+    log.info("Elo entries loaded: %d", len(elo_data))
+
+    predictor = TennisModelPredictor()
+    if not predictor.load():
+        log.error("Failed to load tennis model")
+        return 1
+    predictor.MIN_CONFIDENCE = 0.0
+
+    te_round_map = _build_te_round_map()
+    log.info("Round map entries: %d", len(te_round_map))
+
+    state = load_state()
+
+    counts = {"qualified": 0, "scheduled": 0, "immediate": 0,
+              "skipped_dedup": 0, "skipped_filter": 0}
+    selections_for_report: list[dict] = []
+
+    for market in today_markets:
+        if market["market_hash"] in state.get("open_picks", {}):
+            counts["skipped_dedup"] += 1
+            continue
+        selection = evaluate_market(
+            market, elo_data, predictor, te_round_map, state, now_utc
+        )
+        if selection is None:
+            counts["skipped_filter"] += 1
+            continue
+
+        counts["qualified"] += 1
+        outcome = schedule_or_place(selection, now_utc, lead_min, placer_cmd)
+        if outcome["placement_path"] == "scheduled":
+            counts["scheduled"] += 1
+        else:
+            counts["immediate"] += 1
+        persist_selection(selection, outcome, pending_file)
+        selections_for_report.append({
+            **selection,
+            "_placement_path": outcome["placement_path"],
+            "_scheduled_at_iso": outcome.get("scheduled_at_iso"),
+        })
+        log.info("Selection: %s @ %s (path=%s)",
+                 selection["pick"], outcome.get("scheduled_at_iso") or "now",
+                 outcome["placement_path"])
+
+    log.info(
+        "Summary: qualified=%d scheduled=%d immediate=%d "
+        "skipped_dedup=%d skipped_filter=%d",
+        counts["qualified"], counts["scheduled"], counts["immediate"],
+        counts["skipped_dedup"], counts["skipped_filter"],
+    )
+
+    if vault_dir is not None:
+        try:
+            report_path = write_vault_report(
+                now_utc, counts, selections_for_report,
+                len(all_markets), len(today_markets), vault_dir,
+            )
+            log.info("Vault report written: %s", report_path)
+        except Exception as exc:
+            log.warning("Vault report write failed: %s", exc)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
