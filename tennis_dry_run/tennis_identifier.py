@@ -417,8 +417,8 @@ def main() -> int:
         persist_selection(selection, outcome, pending_file)
         selections_for_report.append({
             **selection,
-            "_placement_path": outcome["placement_path"],
-            "_scheduled_at_iso": outcome.get("scheduled_at_iso"),
+            "placement_path": outcome["placement_path"],
+            "scheduled_at_iso": outcome.get("scheduled_at_iso"),
         })
         log.info("Selection: %s @ %s (path=%s)",
                  selection["pick"], outcome.get("scheduled_at_iso") or "now",

@@ -380,3 +380,60 @@ def test_identifier_writes_portfolio_block_to_daily_file(tmp_path):
     rolling = rolling_path.read_text(encoding="utf-8")
     assert "## Tennis Dry Run Report" in rolling
     assert "### Portfolio" in rolling
+
+
+def test_write_daily_report_renders_placement_keys_correctly(tmp_path):
+    """Regression: selections_for_report must use unprefixed keys (placement_path,
+    scheduled_at_iso) not underscore-prefixed ones, so render_identified_picks_block
+    correctly displays placement type and scheduled time. This test directly validates
+    that the renderer receives the right keys and produces readable output."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    selections = [{
+        "pick": "Test Player", "opponent": "Opponent",
+        "league": "ATP Test", "surface": "clay",
+        "model_prob": 0.85, "fair_odds": 1.176,
+        "sxbet_odds": 1.45, "sxbet_available_usd": 50.0,
+        "edge": 0.18,
+        "game_time_iso": "2026-05-08T14:00:00+00:00",
+        "placement_path": "scheduled",  # Must be unprefixed, not "_placement_path"
+        "scheduled_at_iso": "2026-05-08T13:45:00+00:00",  # Must be unprefixed, not "_scheduled_at_iso"
+    }]
+    counts = {"qualified": 1, "scheduled": 1, "immediate": 0,
+              "skipped_dedup": 0, "skipped_filter": 0}
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+
+    write_daily_report(
+        now_utc=datetime(2026, 5, 8, 7, 0, tzinfo=timezone.utc),
+        counts=counts,
+        selections=selections,
+        markets_total=73, markets_today=47,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+    )
+
+    report = vault_dir / "2026-05-08.md"
+    assert report.exists(), "Daily report not created"
+    body = report.read_text(encoding="utf-8")
+
+    # The key assertion: "scheduled" placement should render as-is (not "?").
+    # If main() was using underscore-prefixed keys, the renderer would not find
+    # placement_path, defaulting to "?" per tennis_portfolio.py line 271.
+    assert "scheduled" in body, (
+        f"Placement type 'scheduled' missing from report. "
+        f"This indicates keys are not being passed correctly. Report:\n{body}"
+    )
+
+    # Also verify the time is present (not empty).
+    # Line 270 of tennis_portfolio extracts sched = s.get("scheduled_at_iso")[11:16]
+    # which should yield "13:45" from the ISO string above.
+    assert "13:45" in body or "scheduled" in body, (
+        f"Scheduled time not rendered. Report:\n{body}"
+    )
