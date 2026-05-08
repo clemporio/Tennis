@@ -284,3 +284,108 @@ def render_identified_picks_block(selections: list[dict]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def render_today_placer_activity_block(
+    placed_today: list[dict],
+    placer_skips: list[dict],
+    replay: dict,
+) -> str:
+    """Render today's placer-fire log (placed + skipped) with per-mode stakes."""
+    if not placed_today and not placer_skips:
+        return "## Today's Placer Activity\n\n_No placer activity today._\n"
+
+    from tennis_kelly import day_start_stake
+
+    lines = [
+        "## Today's Placer Activity",
+        "",
+        "| Pick | Opponent | SX Bet @T-15 | Base | ¼K | ½K | Edge | Result |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for p in placed_today:
+        prob = float(p["model_prob"])
+        odds = float(p["sxbet_odds"])
+        avail = float(p.get("sxbet_available_usd", 0.0))
+        edge = float(p.get("edge", 0.0))
+
+        b = day_start_stake(
+            mode="base", base_stake=25.0, kelly_multiplier=0.0,
+            day_start_balance=replay["base"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+        q = day_start_stake(
+            mode="quarter_kelly", base_stake=25.0, kelly_multiplier=0.25,
+            day_start_balance=replay["quarter_kelly"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+        h = day_start_stake(
+            mode="half_kelly", base_stake=25.0, kelly_multiplier=0.5,
+            day_start_balance=replay["half_kelly"]["today_start_balance"],
+            prob=prob, decimal_odds=odds, liquidity_usd=avail,
+        )
+
+        lines.append(
+            f"| {p.get('pick','?')} | {p.get('opponent','?')} | "
+            f"{odds:.3f} | {_money_abs(b['stake'])} | "
+            f"{_money_abs(q['stake'])} | {_money_abs(h['stake'])} | "
+            f"{_pct(edge*100)} | placed ({p.get('mode','dry_run')}) |"
+        )
+
+    for s in placer_skips:
+        odds = s.get("sxbet_odds")
+        odds_str = f"{float(odds):.3f}" if isinstance(odds, (int, float)) else "—"
+        edge = s.get("edge")
+        edge_str = _pct(edge * 100) if isinstance(edge, (int, float)) else "—"
+
+        lines.append(
+            f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+            f"{odds_str} | — | — | — | {edge_str} | "
+            f"skipped: {s.get('reason','?')} |"
+        )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_today_settlements_block(
+    settlements: list[dict],
+    placed_lookup: dict,
+) -> str:
+    """Render today's settled trades with per-mode P&L."""
+    if not settlements:
+        return "## Today's Settlements\n\n_No settlements today._\n"
+
+    from tennis_kelly import kelly_fraction
+
+    lines = [
+        "## Today's Settlements",
+        "",
+        "| Pick | Opponent | Entry odds | Outcome | Base P&L | ¼K P&L | ½K P&L |",
+        "|---|---|---:|---|---:|---:|---:|",
+    ]
+    for s in settlements:
+        pid = s["pick_id"]
+        p = placed_lookup.get(pid, {})
+        odds = float(p.get("sxbet_odds", 0.0))
+        prob = float(p.get("model_prob", 0.0))
+        avail = float(p.get("sxbet_available_usd", 0.0))
+        won = bool(s.get("won", False))
+        outcome = "WIN" if won else "LOSS"
+
+        b_stake = min(25.0, avail) if avail else 25.0
+        b_pnl = b_stake * (odds - 1.0) if won else -b_stake
+
+        f = kelly_fraction(prob=prob, decimal_odds=odds)
+        q_stake = min(0.25 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        h_stake = min(0.5 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        q_pnl = q_stake * (odds - 1.0) if won else -q_stake
+        h_pnl = h_stake * (odds - 1.0) if won else -h_stake
+
+        lines.append(
+            f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+            f"{odds:.3f} | {outcome} | "
+            f"{_money(b_pnl)} | {_money(q_pnl)} | {_money(h_pnl)} |"
+        )
+    lines.append("")
+    return "\n".join(lines)

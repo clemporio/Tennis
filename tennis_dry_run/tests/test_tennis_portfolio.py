@@ -215,3 +215,75 @@ def test_identified_picks_block_with_real_odds():
     assert "+22.60%" in out
     assert "$39.05" in out
     assert "—" in out  # Swiatek's blank cells
+
+
+from tennis_portfolio import (
+    render_today_placer_activity_block,
+    render_today_settlements_block,
+)
+
+
+def test_today_placer_activity_empty():
+    out = render_today_placer_activity_block(placed_today=[], placer_skips=[], replay={
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    })
+    assert "_No placer activity today._" in out
+
+
+def test_today_placer_activity_mixed():
+    placed = [{
+        "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
+        "model_prob": 0.8713, "sxbet_odds": 1.4953,
+        "sxbet_available_usd": 1000.0, "edge": 0.2026,
+        "stake": 25.0, "ts": "2026-05-08T11:55:00+00:00",
+    }]
+    skipped = [{
+        "pick": "Alexander Zverev", "opponent": "Daniel Altmaier",
+        "league": "ATP Rome", "sxbet_odds": 1.087,
+        "edge": -0.063, "reason": "negative_edge",
+        "ts": "2026-05-08T10:45:00+00:00",
+    }]
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_today_placer_activity_block(placed_today=placed, placer_skips=skipped, replay=replay)
+    assert "Djokovic" in out
+    assert "placed" in out
+    assert "Zverev" in out
+    assert "skipped: negative_edge" in out
+    assert "$25.00" in out  # Djokovic base
+    assert "$76." in out    # Djokovic ¼K
+    assert "$152." in out   # Djokovic ½K
+    assert "—" in out       # Zverev stake columns
+
+
+def test_today_settlements_empty():
+    out = render_today_settlements_block(settlements=[], placed_lookup={})
+    assert "_No settlements today._" in out
+
+
+def test_today_settlements_winning():
+    settlements = [{
+        "pick_id": "0xdjk",
+        "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
+        "won": True, "pnl": 12.38,
+        "ts": "2026-05-08T15:00:00+00:00",
+    }]
+    placed = {"0xdjk": {
+        "pick_id": "0xdjk", "model_prob": 0.8713,
+        "sxbet_odds": 1.4953, "sxbet_available_usd": 1000.0,
+        "stake": 25.0,
+        "ts": "2026-05-08T11:55:00+00:00",
+    }}
+    out = render_today_settlements_block(settlements=settlements, placed_lookup=placed)
+    assert "Djokovic" in out
+    assert "WIN" in out
+    assert "$+12.38" in out
+    # Kelly P&L should be roughly 76.40*0.4953 = 37.83
+    assert "$+37." in out
+    # half-K = 152.81 * 0.4953 = 75.66
+    assert "$+75." in out
