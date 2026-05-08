@@ -7,6 +7,9 @@ bankroll trajectories from the same trade journal.
 
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime, date, timezone
+
 
 def kelly_fraction(prob: float, decimal_odds: float) -> float:
     """Compute the Kelly fraction for a binary back-bet.
@@ -84,10 +87,6 @@ def day_start_stake(
     return {"stake": pre_cap, "pre_cap_stake": pre_cap, "capped": False}
 
 
-from datetime import datetime, date, timezone
-from collections import defaultdict
-
-
 _MODES = (
     ("base", 0.0),
     ("quarter_kelly", 0.25),
@@ -97,10 +96,6 @@ _MODES = (
 
 def _parse_ts(ts: str) -> datetime:
     return datetime.fromisoformat(ts).astimezone(timezone.utc)
-
-
-def _utc_date(ts: str) -> date:
-    return _parse_ts(ts).date()
 
 
 def _empty_mode_state(starting_balance: float) -> dict:
@@ -189,6 +184,7 @@ def replay_three_bankrolls(
                     decimal_odds=float(row["sxbet_odds"]),
                     liquidity_usd=float(row["sxbet_available_usd"]),
                 )
+                stake_info["entry_odds"] = float(row["sxbet_odds"])
                 ms["open_stakes"][row["pick_id"]] = stake_info
                 ms["deployed"] += stake_info["stake"]
                 if stake_info["capped"]:
@@ -203,13 +199,7 @@ def replay_three_bankrolls(
                 stake = stake_info["stake"]
                 won = bool(row.get("won", False))
 
-                # Pull entry odds from the placed row (settle row may not carry them).
-                placed_row = next(
-                    (p for p in placed_trades if p["pick_id"] == pick_id), None
-                )
-                if placed_row is None:
-                    continue
-                odds = float(placed_row["sxbet_odds"])
+                odds = stake_info["entry_odds"]
                 pnl = stake * (odds - 1.0) if won else -stake
 
                 ms["balance"] += pnl
