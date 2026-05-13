@@ -242,6 +242,33 @@ def test_resolve_shadow_outcomes_marks_pending_when_no_match_found():
     assert out[0].get("result_winner") is None
 
 
+def test_resolve_shadow_outcomes_marks_void_when_match_retired():
+    """Shadow pick matched to a retired result must be VOIDED (status='RETIRED',
+    theoretical_pnl=0.0). A retirement is neither a WIN nor a LOSS — settling
+    it as LOSS would corrupt shadow win-rate / theoretical PnL stats."""
+    from tennis_eod_report import resolve_shadow_outcomes
+
+    shadows = [{
+        "pick_id": "0xret", "pick": "Carlos Alcaraz", "opponent": "Stefanos Tsitsipas",
+        "league": "ATP Rome", "fair_odds": 1.45, "model_prob": 0.69,
+        "game_time": 1778336400,
+    }]
+    # Scraper emits retired=True when match ends in retirement. The "winner"
+    # field may be populated (the non-retiring player) but we must NOT treat
+    # this as a settled WIN or LOSS for our pick.
+    completed = [{
+        "player_a": "Alcaraz C.", "player_b": "Tsitsipas S.",
+        "winner": "Tsitsipas S.", "retired": True, "tournament": "Rome",
+    }]
+
+    out = resolve_shadow_outcomes(shadows, completed, base_stake_usd=25.0)
+
+    assert len(out) == 1
+    row = out[0]
+    assert row["status"] == "RETIRED"
+    assert row["theoretical_pnl"] == 0.0
+
+
 def test_resolve_shadow_outcomes_preserves_input_fields():
     """Resolution adds outcome fields without dropping any input keys."""
     from tennis_eod_report import resolve_shadow_outcomes

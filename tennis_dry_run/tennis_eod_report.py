@@ -93,6 +93,16 @@ def resolve_shadow_outcomes(
                              "theoretical_pnl": 0.0, "result_winner": None})
             continue
 
+        # Retirement → void the shadow pick (status="RETIRED", pnl=0). A
+        # retirement is neither a WIN nor a LOSS; treating it as LOSS would
+        # corrupt shadow win-rate / theoretical PnL aggregates. Mirrors the
+        # bot's settlement journal which uses outcome="retired".
+        if match.get("retired"):
+            enriched.append({**sel, "status": "RETIRED",
+                             "theoretical_pnl": 0.0,
+                             "result_winner": match.get("winner")})
+            continue
+
         won = match_player_name(pick_player, match.get("winner", ""))
         if won:
             pnl = base_stake_usd * (fair_odds - 1.0)
