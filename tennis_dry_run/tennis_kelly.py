@@ -185,6 +185,13 @@ def replay_three_bankrolls(
                     liquidity_usd=float(row["sxbet_available_usd"]),
                 )
                 stake_info["entry_odds"] = float(row["sxbet_odds"])
+                # If a prior open for the same pick_id is still open, subtract
+                # its stake from deployed before overwriting — the journal can
+                # contain duplicate open rows (bot+placer race) but the bot
+                # only ever has one position per market.
+                prior = ms["open_stakes"].get(row["pick_id"])
+                if prior is not None:
+                    ms["deployed"] -= prior["stake"]
                 ms["open_stakes"][row["pick_id"]] = stake_info
                 ms["deployed"] += stake_info["stake"]
                 if stake_info["capped"]:
