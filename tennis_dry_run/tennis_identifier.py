@@ -25,6 +25,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tennis_dry_run import (  # noqa: E402
     ELO_FILE,
+    MAX_DAILY_BETS,
     MAX_ODDS,
     MIN_CONFIDENCE,
     MIN_ODDS,
@@ -59,6 +60,19 @@ def _is_excluded_league(league: str) -> bool:
         return False
     low = league.lower()
     return any(sub in low for sub in EXCLUDED_LEAGUE_SUBSTRINGS)
+
+
+def _daily_cap_remaining(state: dict, qualified_this_run: int,
+                         now_utc: datetime, cap: int) -> int:
+    """How many more tier-A picks can be qualified before the daily cap.
+
+    `state.today_bets` is the bot's persisted counter; treat as zero when
+    `state.today_date` is missing or stale (yesterday or earlier), since the
+    counter resets at UTC midnight via placer rollover.
+    """
+    today_str = now_utc.strftime("%Y-%m-%d")
+    already_today = int(state.get("today_bets", 0)) if state.get("today_date") == today_str else 0
+    return max(0, cap - already_today - qualified_this_run)
 
 
 def _is_on_date(ts_iso: str, target) -> bool:
@@ -551,8 +565,10 @@ def main() -> int:
         "skipped_no_elo": 0, "skipped_low_conf": 0,
         "skipped_round": 0, "skipped_odds": 0,
         "skipped_excluded_league": 0, "skipped_no_pred": 0,
+        "skipped_daily_cap": 0,
         "shadow": 0,
     }
+    daily_cap = int(os.getenv("TENNIS_MAX_DAILY_BETS", str(MAX_DAILY_BETS)))
     selections_for_report: list[dict] = []
     shadow_for_report: list[dict] = []
 
@@ -599,6 +615,14 @@ def main() -> int:
             continue
 
         # Tier A — placement track.
+        if _daily_cap_remaining(state, counts["qualified"], now_utc, daily_cap) <= 0:
+            counts["skipped_daily_cap"] += 1
+            counts["skipped_filter"] += 1
+            log.info("identifier: daily cap %d reached (already_today=%d, "
+                     "qualified_this_run=%d) — skipping further tier-A picks",
+                     daily_cap, int(state.get("today_bets", 0)),
+                     counts["qualified"])
+            continue
         counts["qualified"] += 1
         outcome = schedule_or_place(selection, now_utc, lead_min, placer_cmd)
         if outcome["placement_path"] == "scheduled":
