@@ -334,6 +334,35 @@ def append_journal(entry: dict, journal_file: Path = JOURNAL_FILE) -> None:
         fh.write(json.dumps(entry) + "\n")
 
 
+def _apply_settled_corrections(rows: list[dict]) -> list[dict]:
+    """For each `settled_correction` row, replace the `settled` row it corrects.
+
+    Removes `settled_correction` rows from the output and overrides the
+    original `settled` rows with the correction's outcome/pnl/result_winner
+    fields. Other row types pass through unchanged.
+
+    Use this anywhere the journal is loaded before being fed to renderers or
+    replay so that downstream consumers see corrected values transparently.
+    """
+    corrections = {r["corrects"]: r for r in rows if r.get("type") == "settled_correction"}
+    out: list[dict] = []
+    for r in rows:
+        if r.get("type") == "settled_correction":
+            continue
+        if r.get("type") == "settled" and r.get("ts") in corrections:
+            c = corrections[r["ts"]]
+            merged = dict(r)
+            merged["outcome"] = c["outcome"]
+            merged["pnl"] = c["pnl"]
+            merged["result_winner"] = c.get("result_winner", merged.get("result_winner"))
+            merged["corrected"] = True
+            merged["correction_ts"] = c["ts"]
+            out.append(merged)
+        else:
+            out.append(r)
+    return out
+
+
 # ── TennisExplorer Scraping ───────────────────────────────────────────────────
 
 TENNIS_EXPLORER_URL = "https://www.tennisexplorer.com/matches/?type=all"

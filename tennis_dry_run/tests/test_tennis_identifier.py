@@ -1038,3 +1038,46 @@ def test_scan_summary_breaks_down_filter_reasons(tmp_path):
     assert "no_elo" in body and "12" in body
     assert "low_conf" in body and "30" in body
     assert "excluded_league" in body
+
+
+def test_write_daily_report_applies_settled_corrections(tmp_path, monkeypatch):
+    """A journal with a settled_correction must surface the corrected
+    outcome/pnl in Yesterday's Results, not the original wrong values."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import tennis_identifier as ti
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(json.dumps({"open_picks": {}}), encoding="utf-8")
+    (state_dir / "trades.jsonl").write_text(
+        json.dumps({"type": "open", "pick_id": "p1", "pick": "Alpha A.",
+                    "opponent": "Bravo B.", "model_prob": 0.85, "sxbet_odds": 1.5,
+                    "sxbet_available_usd": 500.0, "stake": 25.0,
+                    "ts": "2026-05-11T07:00:00+00:00"}) + "\n" +
+        json.dumps({"type": "settled", "pick_id": "p1", "pick": "Alpha A.",
+                    "opponent": "Bravo B.", "outcome": "win", "pnl": 12.5,
+                    "stake": 25.0, "result_winner": "Alpha A.", "sxbet_odds": 1.5,
+                    "ts": "2026-05-12T15:00:00+00:00"}) + "\n" +
+        json.dumps({"type": "settled_correction", "corrects": "2026-05-12T15:00:00+00:00",
+                    "pick_id": "p1", "pick": "Alpha A.", "opponent": "Bravo B.",
+                    "outcome": "loss", "pnl": -25.0, "stake": 25.0,
+                    "result_winner": "Bravo B.", "sxbet_odds": 1.5,
+                    "ts": "2026-05-13T07:00:00+00:00"}) + "\n",
+        encoding="utf-8")
+
+    out = ti.write_daily_report(
+        now_utc=datetime(2026, 5, 13, 7, 0, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0, "shadow": 0,
+                "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[], markets_total=0, markets_today=0,
+        vault_dir=tmp_path / "vault", state_dir=state_dir,
+    )
+    body = Path(out).read_text(encoding="utf-8")
+    assert "Alpha A." in body
+    assert "LOSS" in body, "Yesterday's Results must show corrected LOSS, not original WIN"
+    # The original WIN must not appear for this pick
+    lines = [ln for ln in body.split("\n") if "Alpha A." in ln and "Bravo B." in ln]
+    assert lines, "no row found for Alpha A. vs Bravo B."
+    assert "WIN" not in lines[0], f"row still shows WIN: {lines[0]}"

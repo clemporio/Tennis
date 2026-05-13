@@ -20,6 +20,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tennis_dry_run import (  # noqa: E402
     STATE_DIR,
+    _apply_settled_corrections,
     match_player_name,
 )
 
@@ -155,6 +156,9 @@ def write_eod_report(
             state = {}
 
     all_trades = _read_jsonl(trades_file)
+    # Apply settled_correction overrides so renderers + replay see the
+    # corrected outcome/pnl/result_winner transparently.
+    all_trades = _apply_settled_corrections(all_trades)
     all_skipped = _read_jsonl(skipped_file)
     skipped_today = [s for s in all_skipped if _is_today(s.get("ts", ""), today)]
     all_placer_skips = [s for s in all_skipped if s.get("source") == "placer"]

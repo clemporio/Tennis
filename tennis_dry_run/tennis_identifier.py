@@ -30,6 +30,7 @@ from tennis_dry_run import (  # noqa: E402
     MIN_ODDS,
     ROUNDS_FILTER,
     STATE_DIR,
+    _apply_settled_corrections,
     _build_model_input,
     _detect_surface,
     _extract_last_and_initial,
@@ -334,21 +335,21 @@ def write_daily_report(
             state = json.loads(state_file.read_text(encoding="utf-8"))
         except Exception:
             state = {}
-    placed: list[dict] = []
-    settled: list[dict] = []
+    all_rows: list[dict] = []
     if trades_file.exists():
         for line in trades_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                row = json.loads(line)
+                all_rows.append(json.loads(line))
             except Exception:
                 continue
-            if row.get("type") == "open":
-                placed.append(row)
-            elif row.get("type") == "settled":
-                settled.append(row)
+    # Apply settled_correction overrides so renderers + replay see the
+    # corrected outcome/pnl/result_winner transparently.
+    all_rows = _apply_settled_corrections(all_rows)
+    placed: list[dict] = [r for r in all_rows if r.get("type") == "open"]
+    settled: list[dict] = [r for r in all_rows if r.get("type") == "settled"]
 
     replay = replay_three_bankrolls(settled, placed, starting_balance=500.0,
                                     today=now_utc.date())
