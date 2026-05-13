@@ -37,6 +37,20 @@ from tennis_dry_run import (  # noqa: E402
 log = logging.getLogger("tennis_placer")
 
 
+def _apply_placement_to_state(state: dict, pick_id: str, trade_entry: dict,
+                              now_utc: datetime) -> dict:
+    """Atomic-mutator helper: roll today_date over if stale, increment
+    today_bets, add the pick to open_picks. Migrated from run_scan in Task F.
+    """
+    today_str = now_utc.strftime("%Y-%m-%d")
+    if state.get("today_date") != today_str:
+        state["today_date"] = today_str
+        state["today_bets"] = 0
+    state.setdefault("open_picks", {})[pick_id] = trade_entry
+    state["today_bets"] = int(state.get("today_bets", 0)) + 1
+    return state
+
+
 def load_selection(pending_file: Path, pick_id: str) -> Optional[dict]:
     """Find the most recent entry in pending_selections.jsonl matching pick_id."""
     if not pending_file.exists():
@@ -144,9 +158,11 @@ def place_pick(
         return _skip(selection, f"executor_block:{result.block_reason}",
                      state_file=state_file)
 
+    place_ts = datetime.now(timezone.utc)
+    result.trade_entry["source"] = "identifier_placer"
+
     def _add(state):
-        state.setdefault("open_picks", {})[pick_id] = result.trade_entry
-        return state
+        return _apply_placement_to_state(state, pick_id, result.trade_entry, place_ts)
 
     update_state_atomic(state_file, _add)
 
