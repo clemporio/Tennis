@@ -664,12 +664,36 @@ def render_yesterday_recap_block(
     total_b = total_q = total_h = 0.0
     wins = losses = 0
     for s in settled_yesterday:
-        p = placed_lookup.get(s.get("pick_id", ""), {})
+        # RETIRED outcomes have no P&L (stake voided). Render before the orphan
+        # check so a retired orphan still gets a zero P&L row.
+        if str(s.get("outcome", "")).lower() == "retired":
+            lines.append(
+                f"| {s.get('pick','?')} | {s.get('opponent','?')} | RETIRED | "
+                f"$0.00 | $0.00 | $0.00 |"
+            )
+            continue
+
+        p = placed_lookup.get(s.get("pick_id", ""))
+        won = str(s.get("outcome", "")).lower() == "win"
+        outcome = "WIN" if won else "LOSS"
+
+        # Orphan: settlement with no matching parent `open` row. Render explicitly
+        # so accuracy bugs (e.g. a winning settle that previously rendered as a
+        # $25 LOSS via odds=0.0) become visible instead of silent.
+        if p is None:
+            lines.append(
+                f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+                f"{outcome} _(orphan)_ | — | — | — |"
+            )
+            if won:
+                wins += 1
+            else:
+                losses += 1
+            continue
+
         odds = float(p.get("sxbet_odds", 0.0))
         prob = float(p.get("model_prob", 0.0))
         avail = float(p.get("sxbet_available_usd", 0.0))
-        won = str(s.get("outcome", "")).lower() == "win"
-        outcome = "WIN" if won else "LOSS"
 
         b_stake = min(25.0, avail) if avail else 25.0
         f = kelly_fraction(prob=prob, decimal_odds=odds)
@@ -728,13 +752,33 @@ def render_today_settlements_block(
         "|---|---|---:|---|---:|---:|---:|",
     ]
     for s in settlements:
+        # RETIRED outcomes have no P&L. Render before the orphan check so a
+        # retired orphan still gets a zero P&L row.
+        if str(s.get("outcome", "")).lower() == "retired":
+            lines.append(
+                f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+                f"— | RETIRED | $0.00 | $0.00 | $0.00 |"
+            )
+            continue
+
         pid = s["pick_id"]
-        p = placed_lookup.get(pid, {})
+        p = placed_lookup.get(pid)
+        won = str(s.get("outcome", "")).lower() == "win"
+        outcome = "WIN" if won else "LOSS"
+
+        # Orphan: settlement with no matching parent `open` row. Render explicitly
+        # so accuracy bugs (e.g. winning settle previously rendering as $-25 LOSS
+        # via odds=0.0) become visible instead of silent.
+        if p is None:
+            lines.append(
+                f"| {s.get('pick','?')} | {s.get('opponent','?')} | "
+                f"— | {outcome} _(orphan)_ | — | — | — |"
+            )
+            continue
+
         odds = float(p.get("sxbet_odds", 0.0))
         prob = float(p.get("model_prob", 0.0))
         avail = float(p.get("sxbet_available_usd", 0.0))
-        won = str(s.get("outcome", "")).lower() == "win"
-        outcome = "WIN" if won else "LOSS"
 
         b_stake = min(25.0, avail) if avail else 25.0
         b_pnl = b_stake * (odds - 1.0) if won else -b_stake

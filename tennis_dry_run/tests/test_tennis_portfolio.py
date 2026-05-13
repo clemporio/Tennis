@@ -945,3 +945,65 @@ def test_open_picks_zero_odds_treated_as_incomplete():
     assert "### Open Picks (0)" in out
     assert "Alpha" in out and "(incomplete data)" in out
     assert "Gamma" in out
+
+
+def test_yesterday_recap_marks_orphan_settlement():
+    """A settlement whose pick_id isn't in placed_lookup must render with
+    an explicit (orphan) tag rather than silently computing P&L with odds=0."""
+    from datetime import date
+    from tennis_portfolio import render_yesterday_recap_block
+
+    settled = [{
+        "pick_id": "ghost", "pick": "Mystery M.", "opponent": "Unknown U.",
+        "outcome": "win", "ts": "2026-05-12T15:00:00+00:00",
+    }]
+    placed_lookup: dict = {}  # no matching parent
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_yesterday_recap_block(date(2026, 5, 12), settled, placed_lookup, replay=replay)
+    assert "orphan" in out.lower(), f"expected orphan marker, got:\n{out}"
+
+
+def test_today_settlements_marks_orphan_settlement():
+    """Same orphan guard as yesterday recap, but for the today-settlements block."""
+    from tennis_portfolio import render_today_settlements_block
+
+    settled = [{
+        "pick_id": "ghost", "pick": "Mystery M.", "opponent": "Unknown U.",
+        "outcome": "loss", "ts": "2026-05-13T15:00:00+00:00",
+    }]
+    placed_lookup: dict = {}
+    out = render_today_settlements_block(settled, placed_lookup)
+    assert "orphan" in out.lower(), f"expected orphan marker, got:\n{out}"
+
+
+def test_yesterday_recap_marks_retired_pick():
+    from datetime import date
+    from tennis_portfolio import render_yesterday_recap_block
+
+    settled = [{
+        "pick_id": "p1", "pick": "Alpha A.", "opponent": "Bravo B.",
+        "outcome": "retired", "ts": "2026-05-12T15:00:00+00:00",
+    }]
+    placed_lookup = {"p1": {"pick_id": "p1", "sxbet_odds": 1.5, "model_prob": 0.8, "sxbet_available_usd": 500.0}}
+    out = render_yesterday_recap_block(date(2026, 5, 12), settled, placed_lookup,
+        replay={"base": {"today_start_balance": 500.0},
+                "quarter_kelly": {"today_start_balance": 500.0},
+                "half_kelly": {"today_start_balance": 500.0}})
+    assert "RETIRED" in out
+    assert "$0.00" in out
+
+
+def test_today_settlements_marks_retired_pick():
+    from tennis_portfolio import render_today_settlements_block
+    settled = [{
+        "pick_id": "p1", "pick": "Alpha A.", "opponent": "Bravo B.",
+        "outcome": "retired", "ts": "2026-05-13T15:00:00+00:00",
+    }]
+    placed_lookup = {"p1": {"pick_id": "p1", "sxbet_odds": 1.5, "model_prob": 0.8, "sxbet_available_usd": 500.0}}
+    out = render_today_settlements_block(settled, placed_lookup)
+    assert "RETIRED" in out
+    assert "$0.00" in out
