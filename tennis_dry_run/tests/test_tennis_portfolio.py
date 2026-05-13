@@ -843,3 +843,35 @@ def test_yesterday_recap_mixed_win_loss():
     assert "1 W / 1 L" in out
     assert "WIN" in out
     assert "LOSS" in out
+
+
+def test_yesterday_recap_uses_canonical_kelly_stakes_from_replay():
+    """¼K stake column must use the actual ¼K day-start balance for that
+    UTC day, not the starting $500 approximation."""
+    from datetime import date
+    from tennis_portfolio import render_yesterday_recap_block
+
+    settled_yesterday = [{
+        "pick_id": "p1", "pick": "Aaa", "opponent": "Bbb",
+        "outcome": "win", "ts": "2026-05-12T15:00:00+00:00",
+    }]
+    placed_lookup = {"p1": {
+        "pick_id": "p1", "sxbet_odds": 1.5, "model_prob": 0.85,
+        "sxbet_available_usd": 500.0, "stake": 25.0,
+    }}
+    # Replay has the ¼K sleeve at a different balance on 2026-05-12 from
+    # $500 — we expect render to honour replay's day_start_balance.
+    replay = {
+        "base": {"today_pnl": 0.0, "today_start_balance": 500.0},
+        "quarter_kelly": {"today_pnl": 0.0, "today_start_balance": 600.0},
+        "half_kelly": {"today_pnl": 0.0, "today_start_balance": 700.0},
+    }
+
+    out = render_yesterday_recap_block(
+        date(2026, 5, 12), settled_yesterday, placed_lookup, replay=replay,
+    )
+
+    # ¼ × kelly_fraction(0.85, 1.5) × 600 × (1.5 − 1) — must NOT be 500.
+    # kelly_fraction = (0.85*1.5 - 1) / (1.5 - 1) = 0.275/0.5 = 0.55
+    # qk_stake = 0.25 * 0.55 * 600 = 82.5; qk_pnl = 82.5 * 0.5 = 41.25
+    assert "$+41.25" in out, f"expected $+41.25 in ¼K col, got:\n{out}"

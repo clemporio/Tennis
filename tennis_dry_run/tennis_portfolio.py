@@ -621,17 +621,23 @@ def render_yesterday_recap_block(
     yesterday,
     settled_yesterday: list[dict],
     placed_lookup: dict,
+    *,
+    replay: dict | None = None,
 ) -> str:
     """Render a summary of yesterday's settlements at the top of today's BOD report.
 
-    Makes the EOD → next-day rollover visible. `yesterday` is a date; settled
-    rows have the same schema as today's settlements (outcome string + pnl).
+    When `replay` is provided, ¼K/½K stakes use that sleeve's day_start_balance
+    (canonical). When omitted, falls back to a starting-$500 approximation
+    (legacy). Always prefer passing replay to avoid drift vs the Portfolio block.
     """
     from tennis_kelly import kelly_fraction
 
     iso = yesterday.isoformat()
     if not settled_yesterday:
         return f"## Yesterday's Results — {iso}\n\n_No settlements on {iso}._\n"
+
+    qk_start = (replay or {}).get("quarter_kelly", {}).get("today_start_balance", 500.0)
+    hk_start = (replay or {}).get("half_kelly", {}).get("today_start_balance", 500.0)
 
     lines = [
         f"## Yesterday's Results — {iso}",
@@ -651,8 +657,8 @@ def render_yesterday_recap_block(
 
         b_stake = min(25.0, avail) if avail else 25.0
         f = kelly_fraction(prob=prob, decimal_odds=odds)
-        q_stake = min(0.25 * f * 500.0, avail) if (f > 0 and avail) else 0.0
-        h_stake = min(0.5 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        q_stake = min(0.25 * f * qk_start, avail) if (f > 0 and avail) else 0.0
+        h_stake = min(0.5 * f * hk_start, avail) if (f > 0 and avail) else 0.0
 
         b_pnl = b_stake * (odds - 1.0) if won else -b_stake
         q_pnl = q_stake * (odds - 1.0) if won else -q_stake
@@ -683,12 +689,21 @@ def render_yesterday_recap_block(
 def render_today_settlements_block(
     settlements: list[dict],
     placed_lookup: dict,
+    *,
+    replay: dict | None = None,
 ) -> str:
-    """Render today's settled trades with per-mode P&L."""
+    """Render today's settled trades with per-mode P&L.
+
+    When `replay` is provided, ¼K/½K stakes use that sleeve's today_start_balance
+    (canonical). When omitted, falls back to a starting-$500 approximation.
+    """
     if not settlements:
         return "## Today's Settlements\n\n_No settlements today._\n"
 
     from tennis_kelly import kelly_fraction
+
+    qk_start = (replay or {}).get("quarter_kelly", {}).get("today_start_balance", 500.0)
+    hk_start = (replay or {}).get("half_kelly", {}).get("today_start_balance", 500.0)
 
     lines = [
         "## Today's Settlements",
@@ -709,8 +724,8 @@ def render_today_settlements_block(
         b_pnl = b_stake * (odds - 1.0) if won else -b_stake
 
         f = kelly_fraction(prob=prob, decimal_odds=odds)
-        q_stake = min(0.25 * f * 500.0, avail) if (f > 0 and avail) else 0.0
-        h_stake = min(0.5 * f * 500.0, avail) if (f > 0 and avail) else 0.0
+        q_stake = min(0.25 * f * qk_start, avail) if (f > 0 and avail) else 0.0
+        h_stake = min(0.5 * f * hk_start, avail) if (f > 0 and avail) else 0.0
         q_pnl = q_stake * (odds - 1.0) if won else -q_stake
         h_pnl = h_stake * (odds - 1.0) if won else -h_stake
 

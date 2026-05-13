@@ -348,6 +348,8 @@ def write_daily_report(
                                     today=now_utc.date())
 
     yesterday = now_utc.date() - timedelta(days=1)
+    replay_yesterday = replay_three_bankrolls(settled, placed, starting_balance=500.0,
+                                              today=yesterday)
     settled_yesterday = [
         s for s in settled
         if _is_on_date(s.get("ts", ""), yesterday)
@@ -367,7 +369,7 @@ def write_daily_report(
         "",
         f"BOD run timestamp: {now_utc.replace(microsecond=0).isoformat()}",
         "",
-        render_yesterday_recap_block(yesterday, settled_yesterday, placed_lookup),
+        render_yesterday_recap_block(yesterday, settled_yesterday, placed_lookup, replay=replay_yesterday),
         render_portfolio_block(replay, now_utc),
         render_open_picks_block(open_picks, replay),
         "## Scan Summary",

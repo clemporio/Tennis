@@ -214,7 +214,7 @@ def write_eod_report(
         "",
         render_portfolio_block(replay, now_utc),
         render_today_placer_activity_block(placed_today, placer_skips_today, replay),
-        render_today_settlements_block(settled_today, placed_lookup),
+        render_today_settlements_block(settled_today, placed_lookup, replay=replay),
         render_stale_carryover_block(pending, placer_skips_today, settled_today, now_utc),
         render_shadow_picks_block(shadow_today),
         render_placer_rejection_diagnostics_block(all_placer_skips, placed, now_utc),
