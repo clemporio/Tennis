@@ -59,6 +59,12 @@ MAX_ODDS = 2.00
 PAPER_STAKE = float(os.getenv("TENNIS_BASE_STAKE_USD", "25.0"))
 MAX_DAILY_BETS = 10
 
+# Hard exclusion: bot must never open picks in Challenger / qualifying /
+# ITF leagues. Mirrors tennis_identifier.EXCLUDED_LEAGUE_SUBSTRINGS; can't
+# import from tennis_identifier here without a circular import.
+EXCLUDED_LEAGUE_SUBSTRINGS = ("challenger", "qualifying", "qualif.",
+                              " q1", " q2", " q3", "itf ")
+
 # ── Name Matching ─────────────────────────────────────────────────────────────
 
 
@@ -1053,6 +1059,12 @@ def run_scan(state: dict, executor: TennisExecutor) -> dict:
         player_a = market["player_a"]  # SX Bet full names
         player_b = market["player_b"]
         league = market["league"]
+
+        league_low = (league or "").lower()
+        if any(tag in league_low for tag in EXCLUDED_LEAGUE_SUBSTRINGS):
+            log.info("run_scan: skipping excluded league %r for market %s",
+                     league, market.get("market_hash"))
+            continue
 
         # Detect surface from league name
         surface = _detect_surface(league)
