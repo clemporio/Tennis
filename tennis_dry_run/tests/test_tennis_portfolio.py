@@ -901,3 +901,47 @@ def test_open_picks_header_excludes_unrenderable_rows():
     # The dropped pick is surfaced as a flagged row, not silently lost.
     assert "Gamma" in out
     assert "(incomplete data)" in out
+
+
+def test_open_picks_incomplete_row_has_matching_column_count():
+    """Markdown table requires renderable and incomplete rows to have the
+    same cell count — otherwise renderers misalign or drop cells silently."""
+    from tennis_portfolio import render_open_picks_block
+
+    open_picks = {
+        "p1": {"pick": "Alpha", "opponent": "Beta", "sxbet_odds": 1.5,
+               "model_prob": 0.85, "sxbet_available_usd": 100.0, "edge": 0.1},
+        "p2": {"pick": "Gamma", "opponent": "Delta"},
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)
+    lines = [ln for ln in out.splitlines() if ln.startswith("|")]
+    # First two are header + separator, rest are data rows.
+    pipe_counts = [ln.count("|") for ln in lines]
+    assert len(set(pipe_counts)) == 1, \
+        f"all markdown rows must have same pipe count, got {pipe_counts}"
+
+
+def test_open_picks_zero_odds_treated_as_incomplete():
+    """sxbet_odds == 0 or <=1.0 must NOT crash edge math; treat as incomplete."""
+    from tennis_portfolio import render_open_picks_block
+
+    open_picks = {
+        "p1": {"pick": "Alpha", "opponent": "Beta", "sxbet_odds": 0.0,
+               "model_prob": 0.85, "sxbet_available_usd": 100.0},
+        "p2": {"pick": "Gamma", "opponent": "Delta", "sxbet_odds": 1.0,
+               "model_prob": 0.85, "sxbet_available_usd": 100.0},
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)  # must not raise
+    assert "### Open Picks (0)" in out
+    assert "Alpha" in out and "(incomplete data)" in out
+    assert "Gamma" in out

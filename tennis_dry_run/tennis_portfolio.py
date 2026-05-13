@@ -85,7 +85,11 @@ def render_open_picks_block(open_picks: dict, replay: dict) -> str:
     renderable: list[tuple[str, dict]] = []
     incomplete: list[tuple[str, dict]] = []
     for pid, p in open_picks.items():
-        if p.get("sxbet_odds") is None or p.get("model_prob") is None:
+        odds = p.get("sxbet_odds")
+        prob = p.get("model_prob")
+        if (odds is None or prob is None
+                or not isinstance(odds, (int, float)) or not isinstance(prob, (int, float))
+                or float(odds) <= 1.0):
             incomplete.append((pid, p))
         else:
             renderable.append((pid, p))
@@ -143,8 +147,8 @@ def render_open_picks_block(open_picks: dict, replay: dict) -> str:
 
     for pid, p in incomplete:
         lines.append(
-            f"| {p.get('pick','?')} | {p.get('opponent','?')} | — | "
-            f"{p.get('league','?')} | — | — | — | — | — | _(incomplete data)_ "
+            f"| {p.get('pick','?')} _(incomplete data)_ | {p.get('opponent','?')} | — | "
+            f"{p.get('league','?')} | — | — | — | — | — |"
         )
 
     lines.append("")
