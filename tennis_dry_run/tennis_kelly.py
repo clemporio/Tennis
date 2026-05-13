@@ -209,8 +209,8 @@ def replay_three_bankrolls(
                 odds = stake_info["entry_odds"]
                 pnl = stake * (odds - 1.0) if won else -stake
 
-                ms["balance"] += pnl
-                ms["total_pnl"] += pnl
+                ms["balance"] = round(ms["balance"] + pnl, 2)
+                ms["total_pnl"] = round(ms["total_pnl"] + pnl, 2)
                 ms["deployed"] -= stake
                 ms["daily_pnl"][d] += pnl
 
