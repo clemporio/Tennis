@@ -58,10 +58,11 @@ def test_evaluate_market_short_circuits_on_already_open_pick():
     state = {"open_picks": {"0xabc": {"pick": "Aryna Sabalenka"}}}
     predictor = MagicMock()
 
-    result = ti.evaluate_market(market, elo_data={}, predictor=predictor,
-                                te_round_map={}, state=state, now_utc=datetime(2026, 5, 6, 7, tzinfo=timezone.utc))
+    result, reason = ti.evaluate_market(market, elo_data={}, predictor=predictor,
+                                        te_round_map={}, state=state, now_utc=datetime(2026, 5, 6, 7, tzinfo=timezone.utc))
 
     assert result is None
+    assert reason == "dedup"
     predictor.predict_match.assert_not_called()
 
 
@@ -84,10 +85,11 @@ def test_evaluate_market_returns_qualifying_selection():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is not None
+    assert reason is None
     assert result["pick"] == "Aryna Sabalenka"
     assert result["opponent"] == "Magda Linette"
     assert result["pick_id"] == "0xabc"
@@ -118,10 +120,11 @@ def test_evaluate_market_skips_low_confidence_pick():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "low_conf"
 
 
 def test_evaluate_market_tags_tier_A_when_above_min_confidence():
@@ -142,10 +145,11 @@ def test_evaluate_market_tags_tier_A_when_above_min_confidence():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is not None
+    assert reason is None
     assert result["tier"] == "A"
 
 
@@ -168,10 +172,11 @@ def test_evaluate_market_tags_tier_B_when_in_shadow_band():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is not None
+    assert reason is None
     assert result["tier"] == "B"
     assert result["model_prob"] == pytest.approx(0.74, abs=1e-6)
 
@@ -196,10 +201,11 @@ def test_evaluate_market_skips_challenger_leagues():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "excluded_league"
     # Filter must be PRE-model, so we don't waste a predict call on challengers.
     predictor.predict_match.assert_not_called()
 
@@ -217,10 +223,11 @@ def test_evaluate_market_skips_qualifying_rounds():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, {}, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, {}, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "excluded_league"
     predictor.predict_match.assert_not_called()
 
 
@@ -236,10 +243,11 @@ def test_evaluate_market_skips_itf_leagues():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, {}, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, {}, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "excluded_league"
     predictor.predict_match.assert_not_called()
 
 
@@ -262,10 +270,11 @@ def test_evaluate_market_accepts_main_tour_atp():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is not None
+    assert reason is None
     assert result["pick"] == "Aryna Sabalenka"
 
 
@@ -291,10 +300,11 @@ def test_evaluate_market_skips_tier_B_when_fair_odds_above_max():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None  # 0.55 < 0.70 shadow threshold
+    assert reason == "low_conf"
 
 
 def test_evaluate_market_skips_when_either_player_lacks_elo():
@@ -310,10 +320,11 @@ def test_evaluate_market_skips_when_either_player_lacks_elo():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "no_elo"
     predictor.predict_match.assert_not_called()
 
 
@@ -627,10 +638,11 @@ def test_evaluate_market_skips_when_fair_odds_below_min():
     state = {"open_picks": {}}
     now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
 
-    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
-                                state=state, now_utc=now)
+    result, reason = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                        state=state, now_utc=now)
 
     assert result is None
+    assert reason == "odds"
 
 
 # ── write_daily_report ────────────────────────────────────────────────────────
@@ -994,3 +1006,35 @@ def test_write_daily_report_annotates_bot_opened_picks_not_in_identifier_counts(
     # The Scan Summary should surface that 1 pick exists in open_picks
     # without having been counted in Qualified.
     assert "Bot-opened" in body, f"expected 'Bot-opened' annotation in Scan Summary, got:\n{body[:2000]}"
+
+
+def test_scan_summary_breaks_down_filter_reasons(tmp_path):
+    """Scan Summary in BOD must include per-reason filter counts."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import tennis_identifier as ti
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"open_picks": {}}', encoding="utf-8")
+    (state_dir / "trades.jsonl").write_text("", encoding="utf-8")
+
+    counts = {
+        "qualified": 1, "scheduled": 1, "immediate": 0, "shadow": 2,
+        "skipped_dedup": 0,
+        "skipped_filter": 50,
+        "skipped_no_elo": 12,
+        "skipped_low_conf": 30,
+        "skipped_round": 3,
+        "skipped_odds": 4,
+        "skipped_excluded_league": 1,
+    }
+    out = ti.write_daily_report(
+        now_utc=datetime(2026, 5, 13, 7, 0, tzinfo=timezone.utc),
+        counts=counts, selections=[], markets_total=63, markets_today=52,
+        vault_dir=tmp_path / "vault", state_dir=state_dir,
+    )
+    body = Path(out).read_text(encoding="utf-8")
+    assert "no_elo" in body and "12" in body
+    assert "low_conf" in body and "30" in body
+    assert "excluded_league" in body

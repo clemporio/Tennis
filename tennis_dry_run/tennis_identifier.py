@@ -107,22 +107,28 @@ def evaluate_market(
     te_round_map: dict,
     state: dict,
     now_utc: datetime,
-) -> Optional[dict]:
-    """Run the discovery pipeline on a single market. Returns a selection
-    dict (sufficient for placer to act on later) or None if filtered out.
+) -> tuple[Optional[dict], Optional[str]]:
+    """Run the discovery pipeline on a single market.
+
+    Returns:
+        (selection, skip_reason) tuple:
+          - On success: (selection_dict, None) — selection has full placer payload.
+          - On skip: (None, reason_key) — reason_key is one of:
+            "dedup", "excluded_league", "round", "no_elo", "no_pred",
+            "low_conf", "odds".
 
     Short-circuits on dedup against state.open_picks before any model work.
     """
     market_hash = market["market_hash"]
     if market_hash in state.get("open_picks", {}):
-        return None
+        return None, "dedup"
 
     player_a = market["player_a"]
     player_b = market["player_b"]
     league = market.get("league", "")
 
     if _is_excluded_league(league):
-        return None
+        return None, "excluded_league"
 
     surface = _detect_surface(league)
 
@@ -131,12 +137,12 @@ def evaluate_market(
     round_key = tuple(sorted([la, lb]))
     match_round = te_round_map.get(round_key, "unknown")
     if match_round != "unknown" and match_round not in ROUNDS_FILTER:
-        return None
+        return None, "round"
 
     pa_elo = _find_player_elo(player_a, elo_data)
     pb_elo = _find_player_elo(player_b, elo_data)
     if not pa_elo or not pb_elo:
-        return None
+        return None, "no_elo"
 
     pa_input = _build_model_input(pa_elo, surface)
     pb_input = _build_model_input(pb_elo, surface)
@@ -146,7 +152,7 @@ def evaluate_market(
     call_args["surface"] = surface
     pred = predictor.predict_match(**call_args)
     if not pred:
-        return None
+        return None, "no_pred"
 
     prob_a = pred["prob_a"]
     prob_b = pred["prob_b"]
@@ -157,11 +163,11 @@ def evaluate_market(
         pick_name, opponent_name, pick_prob = player_b, player_a, prob_b
 
     if pick_prob < SHADOW_MIN_CONFIDENCE:
-        return None
+        return None, "low_conf"
 
     fair_odds = round(1.0 / pick_prob, 3)
     if not (MIN_ODDS <= fair_odds <= MAX_ODDS):
-        return None
+        return None, "odds"
 
     tier = "A" if pick_prob >= MIN_CONFIDENCE else "B"
 
@@ -180,7 +186,7 @@ def evaluate_market(
         "is_pick_outcome_one": pick_name.strip() == player_a.strip(),
         "game_time": market.get("game_time"),
         "ts": now_utc.isoformat(),
-    }
+    }, None
 
 
 def schedule_or_place(
@@ -393,6 +399,12 @@ def write_daily_report(
         f"| Shadow (tier B, 70-80%) | {counts.get('shadow', 0)} |",
         f"| Skipped (dedup) | {counts.get('skipped_dedup', 0)} |",
         f"| Skipped (filter) | {counts.get('skipped_filter', 0)} |",
+        f"| · no_elo | {counts.get('skipped_no_elo', 0)} |",
+        f"| · low_conf | {counts.get('skipped_low_conf', 0)} |",
+        f"| · round | {counts.get('skipped_round', 0)} |",
+        f"| · fair_odds_out_of_range | {counts.get('skipped_odds', 0)} |",
+        f"| · excluded_league | {counts.get('skipped_excluded_league', 0)} |",
+        f"| · no_pred | {counts.get('skipped_no_pred', 0)} |",
         "",
         render_identified_picks_block(selections),
         render_shadow_picks_block(shadow_selections or []),
@@ -532,8 +544,14 @@ def main() -> int:
 
     state = load_state()
 
-    counts = {"qualified": 0, "scheduled": 0, "immediate": 0,
-              "skipped_dedup": 0, "skipped_filter": 0, "shadow": 0}
+    counts = {
+        "qualified": 0, "scheduled": 0, "immediate": 0,
+        "skipped_dedup": 0, "skipped_filter": 0,
+        "skipped_no_elo": 0, "skipped_low_conf": 0,
+        "skipped_round": 0, "skipped_odds": 0,
+        "skipped_excluded_league": 0, "skipped_no_pred": 0,
+        "shadow": 0,
+    }
     selections_for_report: list[dict] = []
     shadow_for_report: list[dict] = []
 
@@ -541,10 +559,11 @@ def main() -> int:
         if market["market_hash"] in state.get("open_picks", {}):
             counts["skipped_dedup"] += 1
             continue
-        selection = evaluate_market(
+        selection, skip_reason = evaluate_market(
             market, elo_data, predictor, te_round_map, state, now_utc
         )
         if selection is None:
+            counts[f"skipped_{skip_reason}"] = counts.get(f"skipped_{skip_reason}", 0) + 1
             counts["skipped_filter"] += 1
             continue
 
