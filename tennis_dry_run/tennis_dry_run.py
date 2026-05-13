@@ -1139,8 +1139,8 @@ def run_settle(state: dict, executor: TennisExecutor) -> dict:
             pnl = float(reconciled["pnl"])
             outcome = reconciled["outcome"]
 
-            state["balance"] = state.get("balance", STARTING_BALANCE) + pnl
-            state["total_pnl"] = state.get("total_pnl", 0.0) + pnl
+            state["balance"] = round(state.get("balance", STARTING_BALANCE) + pnl, 2)
+            state["total_pnl"] = round(state.get("total_pnl", 0.0) + pnl, 2)
             if won:
                 state["wins"] = state.get("wins", 0) + 1
             else:
