@@ -521,12 +521,18 @@ def scrape_completed_results(target_date=None) -> list[dict]:
             i += 1
             continue
 
-        # Check if this match is completed (2+ sets with scores)
+        # Check if this match is completed (2+ sets with scores), OR if a
+        # retirement / walkover marker is present — those bypass the 2-set
+        # gate because they still produce a settlement event.
         score_cells_a = row.find_all("td", class_="score")
         completed_sets_a = sum(
             1 for sc in score_cells_a if re.search(r"\d", sc.get_text())
         )
-        if completed_sets_a < 2:
+        has_retired_marker_a = any(
+            sc.get_text(strip=True).upper() in {"RET", "RETIRED", "W/O", "WO", "DEF"}
+            for sc in score_cells_a
+        )
+        if completed_sets_a < 2 and not has_retired_marker_a:
             i += 1
             continue
 
@@ -548,6 +554,14 @@ def scrape_completed_results(target_date=None) -> list[dict]:
         player_a = re.sub(r"\(\d+\)", "", player_a_raw).strip()
         player_b = re.sub(r"\(\d+\)", "", player_b_raw).strip()
 
+        # Detect retirement / walkover markers in score cells.
+        cell_texts_a = [sc.get_text(strip=True).upper() for sc in score_cells_a]
+        cell_texts_b = [sc.get_text(strip=True).upper() for sc in score_cells_b]
+        retired = any(
+            t in {"RET", "RETIRED", "W/O", "WO", "DEF"}
+            for t in cell_texts_a + cell_texts_b
+        )
+
         # Count sets won by each player.
         # TennisExplorer renders tiebreak set scores as e.g. "6<sup>10</sup>";
         # get_text would flatten that to "610". Strip <sup> so only the games
@@ -565,17 +579,26 @@ def scrape_completed_results(target_date=None) -> list[dict]:
                 sets_b += 1
 
         total_sets = sets_a + sets_b
-        if total_sets < 2:
+        # For a normal completed match we need 2+ sets.  Retired/walkover
+        # matches bypass that gate — they still produce a settlement event,
+        # just one tagged retired.
+        if not retired and total_sets < 2:
             i += 2
             continue
 
-        winner = player_a if sets_a > sets_b else player_b
+        if total_sets == 0:
+            # Pure walkover, no games played. Assume row order is winner-first
+            # (TennisExplorer convention for W/O rows). Fallback only.
+            winner = player_a
+        else:
+            winner = player_a if sets_a > sets_b else player_b
 
         results.append({
             "player_a": player_a,
             "player_b": player_b,
             "winner": winner,
             "tournament": current_tournament,
+            "retired": retired,
         })
         i += 2
 
@@ -1134,17 +1157,27 @@ def run_settle(state: dict, executor: TennisExecutor) -> dict:
             if not (match_order_1 or match_order_2):
                 continue
 
-            won = match_player_name(pick_player, result["winner"])
-            reconciled = executor.reconcile_pick(pick, won=won)
-            pnl = float(reconciled["pnl"])
-            outcome = reconciled["outcome"]
+            if result.get("retired"):
+                pnl = 0.0
+                outcome = "retired"
+                reconciled = {
+                    "outcome": "retired",
+                    "pnl": 0.0,
+                    "mode": pick.get("mode", "dry_run"),
+                }
+            else:
+                won = match_player_name(pick_player, result["winner"])
+                reconciled = executor.reconcile_pick(pick, won=won)
+                pnl = float(reconciled["pnl"])
+                outcome = reconciled["outcome"]
 
             state["balance"] = round(state.get("balance", STARTING_BALANCE) + pnl, 2)
             state["total_pnl"] = round(state.get("total_pnl", 0.0) + pnl, 2)
-            if won:
+            if outcome == "win":
                 state["wins"] = state.get("wins", 0) + 1
-            else:
+            elif outcome == "loss":
                 state["losses"] = state.get("losses", 0) + 1
+            # outcome == "retired": neither wins nor losses incremented
 
             settlement = {
                 "type": "settled",

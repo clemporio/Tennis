@@ -119,3 +119,58 @@ def test_straight_sets_without_tiebreak_still_parses(monkeypatch):
     results = tennis_dry_run.scrape_completed_results()
     assert len(results) == 1
     assert results[0]["winner"] == "Winner W."
+
+
+def test_retirement_match_returned_with_retired_marker(monkeypatch):
+    html = """
+    <table class="result">
+      <tr class="head"><td>ATP - Rome</td></tr>
+      <tr>
+        <td class="time">12:00</td>
+        <td class="t-name">Winner W.</td>
+        <td class="score">6</td>
+        <td class="score">4</td>
+        <td class="score">RET</td>
+      </tr>
+      <tr>
+        <td class="time"></td>
+        <td class="t-name">Loser L.</td>
+        <td class="score">2</td>
+        <td class="score">0</td>
+        <td class="score">&nbsp;</td>
+      </tr>
+    </table>
+    """
+    monkeypatch.setattr(tennis_dry_run.requests, "get",
+                        lambda *a, **kw: _fake_response(html))
+
+    results = tennis_dry_run.scrape_completed_results()
+    assert len(results) == 1
+    assert results[0]["retired"] is True
+    # winner is whoever was leading by sets at retirement
+    assert results[0]["winner"] == "Winner W."
+
+
+def test_walkover_returned_with_retired_marker(monkeypatch):
+    html = """
+    <table class="result">
+      <tr class="head"><td>ATP - Rome</td></tr>
+      <tr>
+        <td class="time">12:00</td>
+        <td class="t-name">Winner W.</td>
+        <td class="score">W/O</td>
+        <td class="score">&nbsp;</td>
+      </tr>
+      <tr>
+        <td class="time"></td>
+        <td class="t-name">Loser L.</td>
+        <td class="score">&nbsp;</td>
+        <td class="score">&nbsp;</td>
+      </tr>
+    </table>
+    """
+    monkeypatch.setattr(tennis_dry_run.requests, "get",
+                        lambda *a, **kw: _fake_response(html))
+    results = tennis_dry_run.scrape_completed_results()
+    assert len(results) == 1
+    assert results[0]["retired"] is True
