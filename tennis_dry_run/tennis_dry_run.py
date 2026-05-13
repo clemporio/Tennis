@@ -971,21 +971,26 @@ def run_predictions(matches: list[dict]) -> list[dict]:
 
 # ── Scan Loop ─────────────────────────────────────────────────────────────────
 
-def run_scan(state: dict, executor: TennisExecutor) -> dict:
-    """Scan SX Bet tennis markets, run model predictions, place orders.
+def run_scan(state: dict, executor: "TennisExecutor | None" = None) -> dict:
+    """DEPRECATED 2026-05-13. Pick creation is now owned by tennis_identifier
+    (cron) + tennis_placer (at-spawned at T-15min). This function is kept
+    as a no-op for one release cycle so external callers (if any) surface
+    via the deprecation warning rather than ImportError. Remove in the
+    cycle after.
+    """
+    log.warning(
+        "run_scan called — DEPRECATED; identifier+placer owns pick creation "
+        "now (Task 12 Option 1 retirement 2026-05-13). Returning state unchanged."
+    )
+    return state
 
-    SX Bet is the source of truth for available markets. For each market:
-    1. Look up both players in Elo DB
-    2. Run LightGBM prediction
-    3. Filter by confidence + odds range
-    4. Fetch orderbook odds from SX Bet
-    5. Hand off to the executor (paper recording or live order)
 
-    Args:
-        state: Current bot state dict (mutated in place).
+def _legacy_run_scan(state: dict, executor: TennisExecutor) -> dict:
+    """Legacy scan implementation, preserved for reference / one release cycle.
 
-    Returns:
-        Updated state dict.
+    Not wired into main(). Kept so the git history of the gate logic is
+    discoverable from a single function definition. Remove together with
+    `run_scan` in the cleanup cycle.
     """
     from tennis_sxbet import TennisSXBet
 
@@ -1384,11 +1389,17 @@ def run_settle(state: dict, executor: TennisExecutor) -> tuple[dict, set[str]]:
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    """Entry point: run the scan/settle loop indefinitely.
+def main(iteration_cap: int | None = None) -> None:
+    """Entry point: run the SETTLE-ONLY loop.
 
-    Scans at each hour listed in SCAN_TIMES_UTC and settles at SETTLE_INTERVAL
-    second intervals whenever there are open picks.
+    Picks are created out-of-band by tennis_identifier (cron 07:00/14:00 UTC)
+    and tennis_placer (`at`-spawned at game_time - 15 min). The bot service
+    no longer scans (`run_scan` retired 2026-05-13, Task 12 Option 1).
+    Each iteration settles any due open picks, then sleeps 60s.
+
+    Args:
+        iteration_cap: If set, exit after this many loop iterations (for
+            tests). Production runs without a cap.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1397,7 +1408,8 @@ def main() -> None:
 
     banner_mode = config.mode.upper()
     log.info("=" * 72)
-    log.info("Tennis bot starting in %s mode", banner_mode)
+    log.info("Tennis bot starting in SETTLE-ONLY mode (%s); picks come from "
+             "tennis_identifier (cron) + tennis_placer (at).", banner_mode)
     if config.mode == "live":
         log.warning(
             "LIVE MODE ACTIVE — orders will be signed and submitted. "
@@ -1407,37 +1419,17 @@ def main() -> None:
             config.max_match_liability_usd,
             config.kill_switch_path,
         )
-    log.info(
-        "scan_times_utc=%s settle_interval=%ds min_confidence=%.2f "
-        "stake=$%.2f max_daily_bets=%d",
-        SCAN_TIMES_UTC, SETTLE_INTERVAL, MIN_CONFIDENCE,
-        config.base_stake_usd, MAX_DAILY_BETS,
-    )
+    log.info("settle_interval=%ds stake=$%.2f", SETTLE_INTERVAL, config.base_stake_usd)
     log.info("=" * 72)
 
     state = load_state()
     executor.set_today_live_stake(state.get("today_live_stake", 0.0))
 
-    scanned_hours: set[int] = set()
-
+    iteration = 0
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
-            current_hour = now_utc.hour
 
-            # Reset scanned_hours at midnight
-            today_str = now_utc.strftime("%Y-%m-%d")
-            if state.get("today_date") != today_str:
-                scanned_hours.clear()
-
-            # Scan check
-            if current_hour in SCAN_TIMES_UTC and current_hour not in scanned_hours:
-                log.info("main: scan window — hour %d UTC", current_hour)
-                state = run_scan(state, executor)
-                save_state(state)
-                scanned_hours.add(current_hour)
-
-            # Settle check
             last_settle_str = state.get("last_settle")
             open_count = len(state.get("open_picks", {}))
             if open_count > 0:
@@ -1453,6 +1445,9 @@ def main() -> None:
                     state, settled_ids = run_settle(state, executor)
                     save_state(state, settled_ids=settled_ids)
 
+            iteration += 1
+            if iteration_cap is not None and iteration >= iteration_cap:
+                return
             time.sleep(60)
 
         except KeyboardInterrupt:

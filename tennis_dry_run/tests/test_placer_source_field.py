@@ -1,10 +1,5 @@
-"""Placer must tag journal open rows with source='identifier_placer' so a
-post-hoc audit can attribute every pick to its originating pipeline (Task G).
-
-After run_scan retirement (Task H), the legacy 'run_scan_legacy' tag is
-gone too — but until then, both sources appear in the journal and must be
-distinguishable.
-"""
+"""Placer tags journal open rows with source='identifier_placer' so a
+post-hoc audit can attribute every pick to its originating pipeline (Task G)."""
 
 from __future__ import annotations
 
@@ -81,61 +76,3 @@ def test_placer_writes_source_identifier_placer(tmp_path, state_file, pending_fi
         f"journal open row missing source field: {rows[0]}"
 
 
-def test_run_scan_writes_source_run_scan_legacy(tmp_path, monkeypatch):
-    """run_scan's journal open row must include source='run_scan_legacy'
-    (until Task H retires run_scan, then the function is a no-op and this
-    test is deleted alongside test_run_scan_excludes_challengers.py)."""
-    import tennis_dry_run as tdr
-    import tennis_sxbet
-
-    monkeypatch.setattr(tdr, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(tdr, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(tdr, "JOURNAL_FILE", tmp_path / "trades.jsonl")
-    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "settlements.jsonl")
-    monkeypatch.setattr(tdr, "SKIPPED_FILE", tmp_path / "skipped.jsonl")
-    monkeypatch.setattr(tdr, "ELO_FILE", tmp_path / "nonexistent_elo.json")
-
-    class _Sxbet:
-        def get_all_tennis_markets(self):
-            return [{
-                "market_hash": "0xabc" + "00" * 30,
-                "player_a": "Player A", "player_b": "Player B",
-                "league": "ATP Rome",
-            }]
-        def get_best_back_odds(self, mh, pick_name, outcome_one_name):
-            return {"decimal_odds": 1.50, "available_usd": 200.0}
-    monkeypatch.setattr(tennis_sxbet, "TennisSXBet", _Sxbet)
-    monkeypatch.setattr(tdr, "scrape_scheduled_matches", lambda: [])
-    monkeypatch.setattr(tdr, "_find_player_elo", lambda name, elo_data: {"overall": 1700.0})
-    monkeypatch.setattr(tdr, "_build_model_input", lambda elo_entry, surface: {"pa_elo": 1700.0})
-
-    class _Predictor:
-        MIN_CONFIDENCE = 0.0
-        def load(self): return True
-        def predict_match(self, **kw): return {"prob_a": 0.9, "prob_b": 0.1}
-    monkeypatch.setattr(tdr, "TennisModelPredictor", _Predictor)
-
-    class _Exec:
-        def place_order(self, pick):
-            return MagicMock(
-                status="dry_run_recorded", mode="dry_run", block_reason=None,
-                trade_entry={"type": "open", "pick_id": pick["pick_id"],
-                             "pick": pick["pick"], "stake": 25.0,
-                             "sxbet_odds": pick["sxbet_odds"],
-                             "ts": pick["ts"]},
-            )
-
-    state = {"balance": 500.0, "total_pnl": 0.0, "wins": 0, "losses": 0,
-             "open_picks": {}, "today_bets": 0, "today_date": "2026-05-14"}
-    tdr.run_scan(state, _Exec())
-
-    journal_path = tmp_path / "trades.jsonl"
-    rows = [
-        json.loads(line)
-        for line in journal_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    open_rows = [r for r in rows if r.get("type") == "open"]
-    assert len(open_rows) == 1, f"expected 1 open row, got {rows}"
-    assert open_rows[0].get("source") == "run_scan_legacy", \
-        f"run_scan open row missing source field: {open_rows[0]}"
