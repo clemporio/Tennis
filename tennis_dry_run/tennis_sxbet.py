@@ -82,19 +82,33 @@ class TennisSXBet:
         taker_prob = 1.0 - maker_prob
         return 1.0 / taker_prob
 
-    def _available_usd(self, total_bet_size: int, fill_amount: int) -> float:
-        """Compute the available liquidity in USD from raw USDC amounts.
+    def _available_usd(
+        self,
+        total_bet_size: int,
+        fill_amount: int,
+        decimal_odds: float,
+    ) -> float:
+        """Compute the TAKER's fillable stake in USD from raw USDC amounts.
 
-        USDC uses 6 decimal places on SX Bet.
+        SX Bet's `totalBetSize` is the maker's lay stake. To back the
+        opposing side, the taker stakes `maker_remaining / (decimal_odds - 1)`
+        — that's all the maker can pay out at decimal_odds D. Reporting the
+        raw maker stake inflates underdog liquidity 2-3× and breaks the
+        MIN_AVAILABLE_USD floor (which must gate fillable taker stake, not
+        maker exposure). USDC uses 6 decimal places on SX Bet.
 
         Args:
-            total_bet_size: raw total order size (USDC micro-units)
+            total_bet_size: raw total maker order size (USDC micro-units)
             fill_amount:    raw amount already filled (USDC micro-units)
+            decimal_odds:   taker decimal odds for this order (must be > 1.0)
 
         Returns:
-            Remaining order size in USD
+            Fillable taker stake in USD.
         """
-        return (int(total_bet_size) - int(fill_amount)) / 1e6
+        maker_remaining = (int(total_bet_size) - int(fill_amount)) / 1e6
+        if decimal_odds <= 1.0:
+            return 0.0
+        return maker_remaining / (decimal_odds - 1.0)
 
     def _normalize_market(self, raw: dict) -> Optional[dict]:
         """Normalize a raw API market dict.
@@ -151,14 +165,14 @@ class TennisSXBet:
             if order["isMakerBettingOutcomeOne"] != maker_side:
                 continue
 
-            available = self._available_usd(
-                order["totalBetSize"], order["fillAmount"]
-            )
-            if available < self._min_available_usd:
-                continue
-
             decimal_odds = self._taker_decimal_odds(order["percentageOdds"])
             if decimal_odds <= 1.0:
+                continue
+
+            available = self._available_usd(
+                order["totalBetSize"], order["fillAmount"], decimal_odds,
+            )
+            if available < self._min_available_usd:
                 continue
 
             if best is None or decimal_odds > best["decimal_odds"]:

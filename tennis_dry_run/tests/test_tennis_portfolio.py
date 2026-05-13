@@ -19,7 +19,11 @@ def _open(pid, ts, prob=0.8713, odds=1.4953, avail=1000.0, stake=25.0):
 
 
 def _settled(pid, ts, won, pnl):
-    return {"type": "settled", "pick_id": pid, "won": won, "pnl": pnl, "ts": ts}
+    return {
+        "type": "settled", "pick_id": pid,
+        "outcome": "win" if won else "loss",
+        "pnl": pnl, "ts": ts,
+    }
 
 
 def test_portfolio_block_zero_state():
@@ -185,15 +189,15 @@ def test_identified_picks_block_empty():
     assert "_No qualifying selections today._" in out
 
 
-def test_identified_picks_block_with_real_odds():
+def test_identified_picks_block_renders_model_only_columns():
+    """Identifier doesn't fetch the orderbook (late-binding to placer at T-15),
+    so the BOD report must not advertise scan-time SX Bet odds / edge / liquidity
+    columns it can never populate. Keep model+match metadata only."""
     selections = [
         {
             "pick": "Iga Swiatek", "opponent": "Catherine McNally",
             "league": "WTA Rome", "surface": "clay",
             "model_prob": 0.8848, "fair_odds": 1.130,
-            "sxbet_odds": None,            # no liquidity at 07:00
-            "sxbet_available_usd": None,
-            "edge": None,
             "game_time_iso": "2026-05-08T09:00:00+00:00",
             "placement_path": "scheduled", "scheduled_at_iso": "2026-05-08T08:45:00+00:00",
         },
@@ -201,20 +205,23 @@ def test_identified_picks_block_with_real_odds():
             "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
             "league": "ATP Rome", "surface": "clay",
             "model_prob": 0.8713, "fair_odds": 1.148,
-            "sxbet_odds": 1.5534,
-            "sxbet_available_usd": 39.05,
-            "edge": 0.226,
             "game_time_iso": "2026-05-08T12:10:00+00:00",
-            "placement_path": "scheduled", "scheduled_at_iso": "2026-05-08T11:55:00+00:00",
+            "placement_path": "immediate", "scheduled_at_iso": None,
         },
     ]
     out = render_identified_picks_block(selections)
     assert "Iga Swiatek" in out
     assert "Catherine McNally" in out
-    assert "1.553" in out  # Djokovic
-    assert "+22.60%" in out
-    assert "$39.05" in out
-    assert "—" in out  # Swiatek's blank cells
+    assert "Novak Djokovic" in out
+    assert "1.130" in out
+    assert "1.148" in out
+    assert "scheduled 08:45" in out
+    assert "immediate" in out
+    assert "0.8848" in out
+    # Removed (always-empty) columns must not appear in the header.
+    assert "SX Bet @07:00" not in out
+    assert "| Edge |" not in out
+    assert "Liquidity" not in out
 
 
 from tennis_portfolio import (
@@ -287,11 +294,421 @@ def test_open_picks_block_skips_pick_without_sxbet_odds():
     assert "Legacy Pick" not in out
 
 
+def test_open_picks_block_uses_game_time_for_match_column():
+    """When `game_time` (unix epoch seconds) is on the pick, the Match (UTC)
+    column should render it — not the placement timestamp."""
+    # game_time = 1778590800 → 2026-05-12 13:00:00 UTC (Zverev v Darderi).
+    open_picks = {
+        "0xzv": {
+            "pick_id": "0xzv", "pick": "Alexander Zverev",
+            "opponent": "Luciano Darderi", "league": "ATP Rome",
+            "model_prob": 0.8495, "sxbet_odds": 1.2085,
+            "sxbet_available_usd": 263.87, "edge": 0.022,
+            "stake": 25.0,
+            "ts": "2026-05-11T07:00:40+00:00",  # placement time — must NOT appear
+            "game_time": 1778590800,
+        }
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)
+    assert "Alexander Zverev" in out
+    # Match column = actual match time (UTC)
+    assert "2026-05-12 13:00" in out
+    # Placement timestamp must NOT appear in the Match column anymore
+    assert "2026-05-11 07:00" not in out
+
+
+def test_open_picks_block_renders_dash_when_game_time_missing():
+    """Legacy picks without game_time get an honest em-dash in the Match column —
+    NOT the placement timestamp (which would be misleading)."""
+    open_picks = {
+        "0xlegacy": {
+            "pick_id": "0xlegacy", "pick": "Old Pick",
+            "opponent": "Someone", "league": "ATP Rome",
+            "model_prob": 0.8, "sxbet_odds": 1.5,
+            "sxbet_available_usd": 100.0, "edge": 0.05,
+            "stake": 25.0,
+            "ts": "2026-05-11T07:00:40+00:00",
+            # no game_time key
+        }
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)
+    assert "Old Pick" in out
+    assert "2026-05-11 07:00" not in out  # placement time MUST NOT appear
+
+
+# ── render_stale_carryover_block ──────────────────────────────────────────────
+
+from tennis_portfolio import render_stale_carryover_block
+
+
+def _ts_unix(year, month, day, hour, minute=0):
+    from datetime import datetime, timezone
+    return int(datetime(year, month, day, hour, minute, tzinfo=timezone.utc).timestamp())
+
+
+def test_stale_carryover_block_empty_when_no_unsettled_today():
+    """All today's picks settled → block renders the empty placeholder."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [{
+        "pick_id": "0xdjk", "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
+        "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 12, 10),
+    }]
+    settled_today = [{"pick_id": "0xdjk", "ts": "2026-05-08T15:00:00+00:00"}]
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=[], settled_today=settled_today, now_utc=now,
+    )
+    assert "_No stale carryovers." in out or "_No carryover picks today." in out
+
+
+def test_stale_carryover_block_lists_picks_skipped_at_placement():
+    """A pick whose game_time was today, never settled, with placer skip event,
+    should appear with the skip reason and last seen sxbet_odds."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [
+        {"pick_id": "0xzv", "pick": "Alexander Zverev", "opponent": "Daniel Altmaier",
+         "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 11, 0)},
+        {"pick_id": "0xsw", "pick": "Iga Swiatek", "opponent": "Catherine McNally",
+         "league": "WTA Rome", "game_time": _ts_unix(2026, 5, 8, 9, 0)},
+    ]
+    placer_skips = [
+        {"pick_id": "0xzv", "pick": "Alexander Zverev", "reason": "negative_edge",
+         "sxbet_odds": 1.087, "edge": -0.063, "ts": "2026-05-08T10:45:00+00:00",
+         "source": "placer"},
+        {"pick_id": "0xsw", "pick": "Iga Swiatek", "reason": "odds_out_of_range_at_placement",
+         "sxbet_odds": 16.0, "ts": "2026-05-08T08:45:00+00:00", "source": "placer"},
+    ]
+
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=placer_skips,
+        settled_today=[], now_utc=now,
+    )
+
+    assert "## Stale Carryovers" in out
+    assert "Alexander Zverev" in out
+    assert "Daniel Altmaier" in out
+    assert "negative_edge" in out
+    assert "1.087" in out
+    assert "Iga Swiatek" in out
+    assert "odds_out_of_range_at_placement" in out
+    assert "16.000" in out
+
+
+def test_stale_carryover_block_marks_picks_with_no_placer_attempt():
+    """If a pick's game_time was today but no placer skip event exists and no
+    settled trade, mark it as 'no placer attempt logged' — surfaces lost picks."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [{
+        "pick_id": "0xlost", "pick": "Mystery Player", "opponent": "Other",
+        "league": "WTA Rome", "game_time": _ts_unix(2026, 5, 8, 14, 0),
+    }]
+
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=[],
+        settled_today=[], now_utc=now,
+    )
+
+    assert "Mystery Player" in out
+    assert "no placer attempt" in out
+
+
+def test_stale_carryover_block_excludes_future_matches():
+    """Picks whose game_time is still in the future (placer hasn't fired yet)
+    are NOT carryovers — they're still pending. Exclude them."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [
+        {"pick_id": "0xpast", "pick": "Past Match", "opponent": "X",
+         "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 11, 0)},
+        {"pick_id": "0xfut", "pick": "Future Match", "opponent": "Y",
+         "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 23, 30)},
+    ]
+
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=[],
+        settled_today=[], now_utc=now,
+    )
+
+    assert "Past Match" in out
+    assert "Future Match" not in out
+
+
+def test_stale_carryover_block_excludes_picks_from_other_days():
+    """Picks whose game_time was on a previous UTC day shouldn't appear in
+    today's EOD section. (They'll have been pruned by the next morning's run.)"""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [
+        {"pick_id": "0xy", "pick": "Yesterday Pick", "opponent": "X",
+         "league": "WTA Rome", "game_time": _ts_unix(2026, 5, 7, 14, 0)},
+        {"pick_id": "0xt", "pick": "Today Pick", "opponent": "Y",
+         "league": "WTA Rome", "game_time": _ts_unix(2026, 5, 8, 14, 0)},
+    ]
+
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=[],
+        settled_today=[], now_utc=now,
+    )
+
+    assert "Today Pick" in out
+    assert "Yesterday Pick" not in out
+
+
+def test_stale_carryover_block_dedups_pending_by_pick_id_keeping_latest():
+    """If pending file has multiple entries for the same pick_id (re-identifier
+    runs), only one row appears in the carryover block."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 8, 22, 0, tzinfo=timezone.utc)
+    pending = [
+        {"pick_id": "0xdup", "pick": "Same Player", "opponent": "X",
+         "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 11, 0)},
+        {"pick_id": "0xdup", "pick": "Same Player", "opponent": "X",
+         "league": "ATP Rome", "game_time": _ts_unix(2026, 5, 8, 11, 0)},
+    ]
+    out = render_stale_carryover_block(
+        pending=pending, placer_skips_today=[],
+        settled_today=[], now_utc=now,
+    )
+    assert out.count("Same Player") == 1
+
+
+# ── render_shadow_picks_block ─────────────────────────────────────────────────
+
+from tennis_portfolio import render_shadow_picks_block
+
+
+def test_shadow_picks_block_empty():
+    """No tier-B selections today → empty placeholder."""
+    out = render_shadow_picks_block(selections=[])
+    assert "_No shadow (tier B) picks today._" in out
+
+
+def test_shadow_picks_block_renders_tier_B_only():
+    """Renders model + match metadata for shadow picks. No placement column
+    since shadow picks never get placed."""
+    selections = [
+        {
+            "pick": "Player A", "opponent": "Player B",
+            "league": "ATP Rome", "surface": "clay",
+            "model_prob": 0.74, "fair_odds": 1.351,
+            "tier": "B",
+            "game_time_iso": "2026-05-09T14:00:00+00:00",
+        },
+        {
+            "pick": "Player C", "opponent": "Player D",
+            "league": "WTA Rome", "surface": "clay",
+            "model_prob": 0.78, "fair_odds": 1.282,
+            "tier": "B",
+            "game_time_iso": "2026-05-09T16:00:00+00:00",
+        },
+    ]
+    out = render_shadow_picks_block(selections)
+    assert "## Shadow Picks (tier B, 70-80% — not placed)" in out
+    assert "Player A" in out
+    assert "Player C" in out
+    assert "1.351" in out
+    assert "1.282" in out
+    assert "0.7400" in out
+    # Must not have a Placement column — tier B never gets placed.
+    assert "Placement" not in out
+
+
+def test_shadow_picks_block_renders_T90_placement_columns():
+    """When selections include `shadow_placement` (the T-90 evaluation done
+    by tennis_shadow_placer), the renderer surfaces a 'T-90 result' column
+    showing would_place / skip-reason and the SX Bet odds at that fire moment."""
+    selections = [
+        {
+            "pick": "Ben Shelton", "opponent": "Basilashvili",
+            "league": "ATP Rome", "surface": "clay",
+            "model_prob": 0.7753, "fair_odds": 1.290, "tier": "B",
+            "game_time_iso": "2026-05-10T10:10:00+00:00",
+            "shadow_placement": {
+                "status": "would_place", "sxbet_odds": 3.31,
+                "available_usd": 284.5, "edge": 0.3733,
+                "ts": "2026-05-10T08:40:00+00:00",
+            },
+        },
+        {
+            "pick": "Other Pick", "opponent": "Foe",
+            "league": "WTA Rome", "surface": "clay",
+            "model_prob": 0.74, "fair_odds": 1.351, "tier": "B",
+            "game_time_iso": "2026-05-10T12:00:00+00:00",
+            "shadow_placement": {
+                "status": "would_skip", "reason": "negative_edge",
+                "sxbet_odds": 1.20, "edge": -0.0933,
+                "ts": "2026-05-10T10:30:00+00:00",
+            },
+        },
+    ]
+    out = render_shadow_picks_block(selections)
+    assert "T-90" in out  # column header
+    assert "would_place" in out
+    assert "negative_edge" in out
+    assert "3.310" in out  # sxbet_odds at T-90 for Ben Shelton
+    assert "1.200" in out  # sxbet_odds at T-90 for Other Pick
+
+
+def test_shadow_picks_block_with_outcomes_renders_status_and_pnl():
+    """When selections include `status` + `theoretical_pnl` (post-resolution),
+    the renderer surfaces an Outcome column and a theoretical-PnL column,
+    plus an aggregate stats footer."""
+    selections = [
+        {
+            "pick": "Ben Shelton", "opponent": "Nikoloz Basilashvili",
+            "league": "ATP Rome", "surface": "clay",
+            "model_prob": 0.7753, "fair_odds": 1.290,
+            "tier": "B",
+            "game_time_iso": "2026-05-09T14:20:00+00:00",
+            "status": "WIN", "theoretical_pnl": 7.25, "result_winner": "Shelton B.",
+        },
+        {
+            "pick": "Tier B Loser", "opponent": "Underdog",
+            "league": "WTA Rome", "surface": "clay",
+            "model_prob": 0.72, "fair_odds": 1.389,
+            "tier": "B",
+            "game_time_iso": "2026-05-09T15:00:00+00:00",
+            "status": "LOSS", "theoretical_pnl": -25.0, "result_winner": "Underdog",
+        },
+        {
+            "pick": "Tier B Pending", "opponent": "Whoever",
+            "league": "WTA Rome", "surface": "clay",
+            "model_prob": 0.74, "fair_odds": 1.351,
+            "tier": "B",
+            "game_time_iso": "2026-05-09T20:00:00+00:00",
+            "status": "pending", "theoretical_pnl": 0.0, "result_winner": None,
+        },
+    ]
+    out = render_shadow_picks_block(selections)
+    assert "Outcome" in out
+    assert "Theo PnL" in out  # column header
+    assert "WIN" in out
+    assert "LOSS" in out
+    assert "pending" in out
+    assert "$+7.25" in out
+    assert "$-25.00" in out
+    # Aggregate footer
+    assert "Resolved: 2" in out
+    assert "Win rate: 50.0%" in out  # 1W / 2 resolved
+    assert "Theoretical PnL: $-17.75" in out  # 7.25 + -25.00
+
+
+def test_shadow_picks_block_aggregate_skipped_when_no_resolutions():
+    """If every shadow pick is still pending, no aggregate footer needed."""
+    selections = [{
+        "pick": "Future Pick", "opponent": "Other",
+        "league": "WTA", "surface": "clay",
+        "model_prob": 0.74, "fair_odds": 1.351, "tier": "B",
+        "game_time_iso": "2026-05-09T22:00:00+00:00",
+        "status": "pending", "theoretical_pnl": 0.0,
+    }]
+    out = render_shadow_picks_block(selections)
+    assert "Outcome" in out
+    assert "pending" in out
+    assert "Resolved:" not in out
+    assert "Win rate" not in out
+
+
+# ── render_placer_rejection_diagnostics_block ────────────────────────────────
+
+from tennis_portfolio import render_placer_rejection_diagnostics_block
+
+
+def test_placer_rejection_diagnostics_empty():
+    """No placer activity in window → empty placeholder."""
+    from datetime import datetime, timezone
+    out = render_placer_rejection_diagnostics_block(
+        placer_skips=[], placed=[],
+        now_utc=datetime(2026, 5, 9, 22, tzinfo=timezone.utc),
+    )
+    assert "_No placer attempts" in out
+
+
+def test_placer_rejection_diagnostics_aggregates_by_reason_with_pct():
+    """Counts each reason + a 'placed' bucket, with percentage of total
+    placer attempts. Surfaces which gates are blocking signal capture."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 9, 22, tzinfo=timezone.utc)
+    placer_skips = [
+        {"reason": "negative_edge", "ts": "2026-05-09T08:45:00+00:00", "source": "placer"},
+        {"reason": "negative_edge", "ts": "2026-05-09T12:15:00+00:00", "source": "placer"},
+        {"reason": "negative_edge", "ts": "2026-05-08T10:45:00+00:00", "source": "placer"},
+        {"reason": "odds_out_of_range_at_placement", "ts": "2026-05-08T08:45:00+00:00", "source": "placer"},
+        {"reason": "odds_out_of_range_at_placement", "ts": "2026-05-07T10:15:00+00:00", "source": "placer"},
+        {"reason": "no_liquidity", "ts": "2026-05-07T08:45:00+00:00", "source": "placer"},
+    ]
+    placed = [
+        {"ts": "2026-05-08T11:55:00+00:00", "pick": "Djokovic"},  # within 7d
+    ]
+
+    out = render_placer_rejection_diagnostics_block(
+        placer_skips=placer_skips, placed=placed, now_utc=now, window_days=7,
+    )
+
+    assert "## Placer Rejection Diagnostics" in out
+    assert "last 7 days" in out
+    # 7 total attempts: 6 skips + 1 placed
+    assert "negative_edge" in out and "| 3 |" in out
+    assert "odds_out_of_range_at_placement" in out and "| 2 |" in out
+    assert "no_liquidity" in out and "| 1 |" in out
+    assert "placed" in out
+    assert "**7**" in out  # total bold
+
+
+def test_placer_rejection_diagnostics_excludes_events_outside_window():
+    """Events older than window_days are not counted."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 9, 22, tzinfo=timezone.utc)
+    placer_skips = [
+        {"reason": "negative_edge", "ts": "2026-05-09T08:45:00+00:00", "source": "placer"},  # in
+        {"reason": "negative_edge", "ts": "2026-04-01T08:45:00+00:00", "source": "placer"},  # out
+    ]
+
+    out = render_placer_rejection_diagnostics_block(
+        placer_skips=placer_skips, placed=[], now_utc=now, window_days=7,
+    )
+
+    # Only 1 in-window event → count should be 1, not 2
+    assert "**1**" in out
+    assert out.count("negative_edge") == 1 or "| 1 |" in out
+
+
+def test_placer_rejection_diagnostics_ignores_non_placer_skips():
+    """Skipped events without source=placer (e.g. scan-time audit skips) are
+    not placement attempts and must not be counted."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 5, 9, 22, tzinfo=timezone.utc)
+    placer_skips = [
+        # source=placer counted
+        {"reason": "negative_edge", "ts": "2026-05-09T08:45:00+00:00", "source": "placer"},
+        # source missing — must NOT be counted
+        {"reason": "negative_edge", "ts": "2026-05-09T07:00:00+00:00"},
+    ]
+
+    out = render_placer_rejection_diagnostics_block(
+        placer_skips=placer_skips, placed=[], now_utc=now, window_days=7,
+    )
+
+    assert "**1**" in out  # only one placement attempt counted
+
+
 def test_today_settlements_winning():
     settlements = [{
         "pick_id": "0xdjk",
         "pick": "Novak Djokovic", "opponent": "Dino Prizmic",
-        "won": True, "pnl": 12.38,
+        "outcome": "win", "pnl": 12.38,
         "ts": "2026-05-08T15:00:00+00:00",
     }]
     placed = {"0xdjk": {
@@ -308,3 +725,121 @@ def test_today_settlements_winning():
     assert "$+37." in out
     # half-K = 152.81 * 0.4953 = 75.66
     assert "$+75." in out
+
+
+def test_today_settlements_reads_outcome_field_not_won_field():
+    """Regression: journal records use `outcome: "win"/"loss"` (string), not `won` (bool).
+
+    Previously the renderer read `s.get("won", False)`, which always returned
+    False for real journal records, causing every settlement to display as LOSS.
+    """
+    settlements = [{
+        "pick_id": "0xmedvedev",
+        "pick": "Daniil Medvedev", "opponent": "Pablo Llamas Ruiz",
+        "outcome": "win", "pnl": 9.96,
+        "ts": "2026-05-11T18:02:18+00:00",
+    }]
+    placed = {"0xmedvedev": {
+        "pick_id": "0xmedvedev", "model_prob": 0.8147,
+        "sxbet_odds": 1.3986, "sxbet_available_usd": 135.52,
+        "stake": 25.0,
+        "ts": "2026-05-10T07:00:55+00:00",
+    }}
+    out = render_today_settlements_block(settlements=settlements, placed_lookup=placed)
+    assert "Medvedev" in out
+    assert "| WIN |" in out
+    assert "LOSS" not in out
+    # Base P&L = 25 * (1.3986 - 1) = 9.965 → "$+9.96" or "$+9.97" depending on rounding
+    assert "$+9.9" in out
+    assert "$-25.00" not in out
+
+
+def test_yesterday_recap_empty():
+    from tennis_portfolio import render_yesterday_recap_block
+    out = render_yesterday_recap_block(
+        yesterday=date(2026, 5, 11),
+        settled_yesterday=[],
+        placed_lookup={},
+    )
+    assert "## Yesterday's Results — 2026-05-11" in out
+    assert "No settlements on 2026-05-11" in out
+
+
+def test_yesterday_recap_with_two_wins():
+    from tennis_portfolio import render_yesterday_recap_block
+    settled = [
+        {
+            "pick_id": "0xmedvedev",
+            "pick": "Daniil Medvedev", "opponent": "Pablo Llamas Ruiz",
+            "outcome": "win", "pnl": 9.96,
+            "ts": "2026-05-11T18:02:18+00:00",
+        },
+        {
+            "pick_id": "0xswiatek",
+            "pick": "Iga Swiatek", "opponent": "Naomi Osaka",
+            "outcome": "win", "pnl": 7.26,
+            "ts": "2026-05-11T20:02:20+00:00",
+        },
+    ]
+    placed = {
+        "0xmedvedev": {
+            "pick_id": "0xmedvedev", "model_prob": 0.8147,
+            "sxbet_odds": 1.3986, "sxbet_available_usd": 135.52,
+            "stake": 25.0,
+        },
+        "0xswiatek": {
+            "pick_id": "0xswiatek", "model_prob": 0.8504,
+            "sxbet_odds": 1.2903, "sxbet_available_usd": 124.26,
+            "stake": 25.0,
+        },
+    }
+    out = render_yesterday_recap_block(
+        yesterday=date(2026, 5, 11),
+        settled_yesterday=settled,
+        placed_lookup=placed,
+    )
+    # Header + both picks rendered
+    assert "## Yesterday's Results — 2026-05-11" in out
+    assert "Medvedev" in out
+    assert "Swiatek" in out
+    # Both shown as WIN
+    assert out.count("| WIN |") == 2
+    assert "LOSS" not in out
+    # Day P&L line summarises totals across all three modes
+    # Base: 9.97 + 7.26 = 17.22-17.23
+    assert "Day P&L" in out
+    assert "$+17.2" in out
+    # Win/loss summary
+    assert "2 W / 0 L" in out
+
+
+def test_yesterday_recap_mixed_win_loss():
+    from tennis_portfolio import render_yesterday_recap_block
+    settled = [
+        {
+            "pick_id": "0xa",
+            "pick": "Player A", "opponent": "Player B",
+            "outcome": "win", "pnl": 12.38,
+            "ts": "2026-05-11T15:00:00+00:00",
+        },
+        {
+            "pick_id": "0xc",
+            "pick": "Player C", "opponent": "Player D",
+            "outcome": "loss", "pnl": -25.0,
+            "ts": "2026-05-11T17:00:00+00:00",
+        },
+    ]
+    placed = {
+        "0xa": {"sxbet_odds": 1.4953, "model_prob": 0.8713,
+                "sxbet_available_usd": 1000.0, "stake": 25.0},
+        "0xc": {"sxbet_odds": 1.5, "model_prob": 0.75,
+                "sxbet_available_usd": 1000.0, "stake": 25.0},
+    }
+    out = render_yesterday_recap_block(
+        yesterday=date(2026, 5, 11),
+        settled_yesterday=settled,
+        placed_lookup=placed,
+    )
+    assert "1 W / 1 L" in out
+    assert "WIN" in out
+    assert "LOSS" in out

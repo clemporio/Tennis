@@ -20,6 +20,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tennis_dry_run import (  # noqa: E402
     STATE_DIR,
+    match_player_name,
 )
 
 log = logging.getLogger("tennis_eod_report")
@@ -56,6 +57,55 @@ def _is_today(ts_iso: str, today: date) -> bool:
         return False
 
 
+def resolve_shadow_outcomes(
+    shadow_selections: list[dict],
+    completed_results: list[dict],
+    base_stake_usd: float = 25.0,
+) -> list[dict]:
+    """Pair each shadow selection with a completed match result, if any.
+
+    Returns a list of selection dicts enriched with:
+      - status: "WIN" | "LOSS" | "pending"
+      - theoretical_pnl: float (0 if pending). For WIN, stake * (fair_odds - 1);
+        for LOSS, -stake. Uses fair_odds because shadow picks never bind to a
+        real T-15 SX Bet price — this is the model-implied PnL, not realised.
+      - result_winner: TennisExplorer winner string, or None if pending.
+    Original selection keys are preserved.
+    """
+    enriched: list[dict] = []
+    for sel in shadow_selections:
+        pick_player = sel.get("pick", "")
+        opponent = sel.get("opponent", "")
+        fair_odds = float(sel.get("fair_odds", 1.0))
+
+        match = None
+        for r in completed_results:
+            ra = r.get("player_a", "")
+            rb = r.get("player_b", "")
+            order_1 = match_player_name(pick_player, ra) and match_player_name(opponent, rb)
+            order_2 = match_player_name(pick_player, rb) and match_player_name(opponent, ra)
+            if order_1 or order_2:
+                match = r
+                break
+
+        if match is None:
+            enriched.append({**sel, "status": "pending",
+                             "theoretical_pnl": 0.0, "result_winner": None})
+            continue
+
+        won = match_player_name(pick_player, match.get("winner", ""))
+        if won:
+            pnl = base_stake_usd * (fair_odds - 1.0)
+            status = "WIN"
+        else:
+            pnl = -base_stake_usd
+            status = "LOSS"
+        enriched.append({**sel, "status": status,
+                         "theoretical_pnl": round(pnl, 2),
+                         "result_winner": match.get("winner")})
+    return enriched
+
+
 def write_eod_report(
     now_utc: datetime,
     state_dir: Path,
@@ -72,6 +122,9 @@ def write_eod_report(
         render_backtest_comparison_block,
         render_today_placer_activity_block,
         render_today_settlements_block,
+        render_stale_carryover_block,
+        render_placer_rejection_diagnostics_block,
+        render_shadow_picks_block,
     )
 
     today = now_utc.date()
@@ -80,6 +133,9 @@ def write_eod_report(
     state_file = Path(state_dir) / "state.json"
     trades_file = Path(state_dir) / "trades.jsonl"
     skipped_file = Path(state_dir) / "skipped.jsonl"
+    pending_file = Path(state_dir) / "pending_selections.jsonl"
+    shadow_file = Path(state_dir) / "shadow_selections.jsonl"
+    shadow_placements_file = Path(state_dir) / "shadow_placements.jsonl"
 
     state: dict = {}
     if state_file.exists():
@@ -89,10 +145,9 @@ def write_eod_report(
             state = {}
 
     all_trades = _read_jsonl(trades_file)
-    skipped_today = [
-        s for s in _read_jsonl(skipped_file)
-        if _is_today(s.get("ts", ""), today)
-    ]
+    all_skipped = _read_jsonl(skipped_file)
+    skipped_today = [s for s in all_skipped if _is_today(s.get("ts", ""), today)]
+    all_placer_skips = [s for s in all_skipped if s.get("source") == "placer"]
 
     placed = [t for t in all_trades if t.get("type") == "open"]
     settled = [t for t in all_trades if t.get("type") == "settled"]
@@ -100,6 +155,52 @@ def write_eod_report(
     settled_today = [s for s in settled if _is_today(s.get("ts", ""), today)]
     placed_lookup = {p["pick_id"]: p for p in placed}
     placer_skips_today = [s for s in skipped_today if s.get("source") == "placer"]
+    pending = _read_jsonl(pending_file)
+
+    # Filter shadow selections to today's matches (by game_time UTC date).
+    shadow_today: list[dict] = []
+    for row in _read_jsonl(shadow_file):
+        gt = row.get("game_time")
+        if gt is None:
+            continue
+        try:
+            gt_dt = datetime.fromtimestamp(float(gt), tz=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if gt_dt.date() != today:
+            continue
+        if "game_time_iso" not in row:
+            row = {**row, "game_time_iso": gt_dt.isoformat()}
+        shadow_today.append(row)
+
+    # Merge T-90 shadow_placements (latest per pick_id) so the renderer can
+    # show would-place vs skip-reason at the comparison fire time.
+    placements_latest: dict = {}
+    for p in _read_jsonl(shadow_placements_file):
+        pid = p.get("pick_id")
+        if not pid:
+            continue
+        prev = placements_latest.get(pid)
+        if prev is None or p.get("ts", "") > prev.get("ts", ""):
+            placements_latest[pid] = p
+    for sel in shadow_today:
+        sp = placements_latest.get(sel.get("pick_id"))
+        if sp:
+            sel["shadow_placement"] = sp
+
+    # Enrich shadow picks with outcomes from TennisExplorer (best-effort —
+    # network failure leaves picks as `pending`, never crashes the report).
+    # Pass `today` so the scraper pins TE's view to the right calendar day
+    # (default URL returns Prague-time "today", which rolls over to tomorrow
+    # before the 22:00 UTC cron and would return zero matches).
+    if shadow_today:
+        try:
+            from tennis_dry_run import scrape_completed_results
+            completed = scrape_completed_results(target_date=today)
+        except Exception as exc:
+            log.warning("Shadow outcome scrape failed: %s", exc)
+            completed = []
+        shadow_today = resolve_shadow_outcomes(shadow_today, completed)
 
     replay = replay_three_bankrolls(settled, placed, starting_balance=500.0,
                                     today=today)
@@ -114,6 +215,9 @@ def write_eod_report(
         render_portfolio_block(replay, now_utc),
         render_today_placer_activity_block(placed_today, placer_skips_today, replay),
         render_today_settlements_block(settled_today, placed_lookup),
+        render_stale_carryover_block(pending, placer_skips_today, settled_today, now_utc),
+        render_shadow_picks_block(shadow_today),
+        render_placer_rejection_diagnostics_block(all_placer_skips, placed, now_utc),
         "---",
         f"_Generated by `tennis_eod_report.py` at "
         f"{now_utc.strftime('%H:%M')} UTC._",

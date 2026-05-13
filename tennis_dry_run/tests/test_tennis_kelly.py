@@ -129,7 +129,8 @@ def _open(pick_id, ts, prob, odds, avail, stake=25.0):
 def _settled(pick_id, ts, won: bool, base_pnl: float):
     return {
         "type": "settled", "pick_id": pick_id,
-        "won": won, "pnl": base_pnl,
+        "outcome": "win" if won else "loss",
+        "pnl": base_pnl,
         "ts": ts,
     }
 

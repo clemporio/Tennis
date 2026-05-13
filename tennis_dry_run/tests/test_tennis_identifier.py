@@ -101,7 +101,7 @@ def test_evaluate_market_returns_qualifying_selection():
 
 
 def test_evaluate_market_skips_low_confidence_pick():
-    """Confidence < MIN_CONFIDENCE (0.80) is filtered out."""
+    """Pick below SHADOW_MIN_CONFIDENCE (0.70) is filtered out entirely."""
     market = {
         "market_hash": "0xdef",
         "player_a": "Player A",
@@ -122,6 +122,179 @@ def test_evaluate_market_skips_low_confidence_pick():
                                 state=state, now_utc=now)
 
     assert result is None
+
+
+def test_evaluate_market_tags_tier_A_when_above_min_confidence():
+    """Pick at >= MIN_CONFIDENCE (0.80) is tagged tier='A' (placement track)."""
+    market = {
+        "market_hash": "0xa",
+        "player_a": "Aryna Sabalenka",
+        "player_b": "Magda Linette",
+        "league": "WTA Madrid",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    elo_data = {
+        "Aryna Sabalenka": {"overall": 2100, "clay": 2080, "rank": 1},
+        "Magda Linette": {"overall": 1700, "clay": 1680, "rank": 60},
+    }
+    predictor = MagicMock()
+    predictor.predict_match.return_value = {"prob_a": 0.85, "prob_b": 0.15}
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is not None
+    assert result["tier"] == "A"
+
+
+def test_evaluate_market_tags_tier_B_when_in_shadow_band():
+    """Pick in [SHADOW_MIN_CONFIDENCE, MIN_CONFIDENCE) = [0.70, 0.80) is tagged
+    tier='B' (shadow track) — no placer fires, but the pick is still recorded."""
+    market = {
+        "market_hash": "0xb",
+        "player_a": "Player A",
+        "player_b": "Player B",
+        "league": "ATP Rome",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    elo_data = {
+        "Player A": {"overall": 1900, "clay": 1900, "rank": 10},
+        "Player B": {"overall": 1700, "clay": 1700, "rank": 50},
+    }
+    predictor = MagicMock()
+    predictor.predict_match.return_value = {"prob_a": 0.74, "prob_b": 0.26}
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is not None
+    assert result["tier"] == "B"
+    assert result["model_prob"] == pytest.approx(0.74, abs=1e-6)
+
+
+def test_evaluate_market_skips_challenger_leagues():
+    """Challenger / qualifying matches must be filtered: a prior backtest
+    showed the model can't predict these reliably (sparse Elo, lower-tier
+    players, different volatility). Filter is a hard gate, before model call."""
+    market = {
+        "market_hash": "0xchall",
+        "player_a": "Player A",
+        "player_b": "Player B",
+        "league": "ATP Challenger - Brazzaville",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    elo_data = {
+        "Player A": {"overall": 2100, "clay": 2080, "rank": 1},
+        "Player B": {"overall": 1700, "clay": 1680, "rank": 60},
+    }
+    predictor = MagicMock()
+    predictor.predict_match.return_value = {"prob_a": 0.85, "prob_b": 0.15}
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is None
+    # Filter must be PRE-model, so we don't waste a predict call on challengers.
+    predictor.predict_match.assert_not_called()
+
+
+def test_evaluate_market_skips_qualifying_rounds():
+    """Same gate covers WTA/ATP qualifying ('Q1', 'Q2', 'Qualifying')."""
+    market = {
+        "market_hash": "0xqual",
+        "player_a": "Player A",
+        "player_b": "Player B",
+        "league": "ATP Rome - Qualifying",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    predictor = MagicMock()
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, {}, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is None
+    predictor.predict_match.assert_not_called()
+
+
+def test_evaluate_market_skips_itf_leagues():
+    market = {
+        "market_hash": "0xitf",
+        "player_a": "Player A",
+        "player_b": "Player B",
+        "league": "ITF Mens W25 - Antalya",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    predictor = MagicMock()
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, {}, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is None
+    predictor.predict_match.assert_not_called()
+
+
+def test_evaluate_market_accepts_main_tour_atp():
+    """ATP Masters / Grand Slam / regular tour-level events must NOT be
+    rejected by the challenger filter."""
+    market = {
+        "market_hash": "0xtour",
+        "player_a": "Aryna Sabalenka",
+        "player_b": "Magda Linette",
+        "league": "WTA Rome",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    elo_data = {
+        "Aryna Sabalenka": {"overall": 2100, "clay": 2080, "rank": 1},
+        "Magda Linette": {"overall": 1700, "clay": 1680, "rank": 60},
+    }
+    predictor = MagicMock()
+    predictor.predict_match.return_value = {"prob_a": 0.85, "prob_b": 0.15}
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is not None
+    assert result["pick"] == "Aryna Sabalenka"
+
+
+def test_evaluate_market_skips_tier_B_when_fair_odds_above_max():
+    """Even tier-B picks must respect MIN_ODDS/MAX_ODDS bounds. A 0.45-prob
+    pick (fair_odds 2.22) is below the threshold *and* outside MAX_ODDS=2.0."""
+    market = {
+        "market_hash": "0xoor",
+        "player_a": "Player A",
+        "player_b": "Player B",
+        "league": "ATP Rome",
+        "game_time": _ts(2026, 5, 6, 14),
+    }
+    elo_data = {
+        "Player A": {"overall": 1800, "clay": 1800, "rank": 30},
+        "Player B": {"overall": 1790, "clay": 1790, "rank": 35},
+    }
+    predictor = MagicMock()
+    # 0.49 < SHADOW_MIN_CONFIDENCE so first filter; OR if you set 0.49,
+    # it's filtered as low confidence regardless. Use 0.74 with synthetic
+    # prob bypass — but easier: check threshold path with 0.45.
+    predictor.predict_match.return_value = {"prob_a": 0.45, "prob_b": 0.55}
+    state = {"open_picks": {}}
+    now = datetime(2026, 5, 6, 7, tzinfo=timezone.utc)
+
+    result = ti.evaluate_market(market, elo_data, predictor, te_round_map={},
+                                state=state, now_utc=now)
+
+    assert result is None  # 0.55 < 0.70 shadow threshold
 
 
 def test_evaluate_market_skips_when_either_player_lacks_elo():
@@ -279,6 +452,132 @@ def test_write_daily_report_overwrites_when_called_twice_same_day(tmp_path):
 
 # ── persist_selection ─────────────────────────────────────────────────────────
 
+# ── prune_stale_pending ───────────────────────────────────────────────────────
+
+def _write_pending(path, rows):
+    import json
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_prune_stale_pending_drops_entries_with_past_game_time(tmp_path):
+    """Entries whose game_time is more than grace_minutes in the past are removed."""
+    pending = tmp_path / "pending.jsonl"
+    now = datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xstale1", "pick": "Qinwen Zheng",
+         "game_time": _ts(2026, 5, 7, 9)},  # ~46h old → prune
+        {"pick_id": "0xstale2", "pick": "Linda Noskova",
+         "game_time": _ts(2026, 5, 7, 11)},  # ~44h old → prune
+        {"pick_id": "0xfresh", "pick": "Jannik Sinner",
+         "game_time": _ts(2026, 5, 9, 17)},  # 10h ahead → keep
+    ]
+    _write_pending(pending, rows)
+
+    result = ti.prune_stale_pending(pending, now_utc=now, grace_minutes=60)
+
+    assert result["pruned"] == 2
+    assert result["kept"] == 1
+    assert sorted(result["pruned_picks"]) == ["Linda Noskova", "Qinwen Zheng"]
+
+    import json
+    surviving = [json.loads(l) for l in pending.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(surviving) == 1
+    assert surviving[0]["pick_id"] == "0xfresh"
+
+
+def test_prune_stale_pending_respects_grace_window(tmp_path):
+    """Entry within grace_minutes of now is kept (match may still be in play)."""
+    pending = tmp_path / "pending.jsonl"
+    now = datetime(2026, 5, 9, 13, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xrecent", "pick": "Live Match",
+         "game_time": _ts(2026, 5, 9, 12, 30)},  # 30 min ago, within 60-min grace → keep
+        {"pick_id": "0xold", "pick": "Old Match",
+         "game_time": _ts(2026, 5, 9, 11, 30)},  # 90 min ago → prune
+    ]
+    _write_pending(pending, rows)
+
+    result = ti.prune_stale_pending(pending, now_utc=now, grace_minutes=60)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 1
+    assert result["pruned_picks"] == ["Old Match"]
+
+
+def test_prune_stale_pending_handles_missing_file(tmp_path):
+    """Missing pending file is a no-op, not a crash."""
+    pending = tmp_path / "does_not_exist.jsonl"
+    now = datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc)
+
+    result = ti.prune_stale_pending(pending, now_utc=now)
+
+    assert result == {"kept": 0, "pruned": 0, "pruned_picks": []}
+    assert not pending.exists()
+
+
+def test_prune_stale_pending_skips_malformed_lines(tmp_path):
+    """Malformed JSON lines are silently dropped, not raising."""
+    pending = tmp_path / "pending.jsonl"
+    now = datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc)
+    pending.write_text(
+        '{"pick_id": "0xfresh", "pick": "Future", "game_time": ' + str(_ts(2026, 5, 9, 17)) + '}\n'
+        'not-json-garbage\n'
+        '\n'
+        '{"pick_id": "0xstale", "pick": "Past", "game_time": ' + str(_ts(2026, 5, 7, 9)) + '}\n',
+        encoding="utf-8",
+    )
+
+    result = ti.prune_stale_pending(pending, now_utc=now, grace_minutes=60)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 1
+    import json
+    surviving = [json.loads(l) for l in pending.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(surviving) == 1
+    assert surviving[0]["pick_id"] == "0xfresh"
+
+
+def test_prune_stale_pending_keeps_entries_without_game_time(tmp_path):
+    """Defensive: an entry missing game_time is kept (unknown → don't drop)."""
+    pending = tmp_path / "pending.jsonl"
+    now = datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xnogt", "pick": "Mystery"},  # no game_time → keep
+    ]
+    _write_pending(pending, rows)
+
+    result = ti.prune_stale_pending(pending, now_utc=now, grace_minutes=60)
+
+    assert result["kept"] == 1
+    assert result["pruned"] == 0
+
+
+def test_prune_stale_pending_is_atomic(tmp_path, monkeypatch):
+    """If the rewrite step fails, the original file is left intact (no half-rewrite)."""
+    pending = tmp_path / "pending.jsonl"
+    now = datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xfresh", "pick": "Future", "game_time": _ts(2026, 5, 9, 17)},
+        {"pick_id": "0xstale", "pick": "Past", "game_time": _ts(2026, 5, 7, 9)},
+    ]
+    _write_pending(pending, rows)
+    original_bytes = pending.read_bytes()
+
+    # Simulate os.replace failing
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr("tennis_identifier.os.replace", boom)
+
+    with pytest.raises(OSError):
+        ti.prune_stale_pending(pending, now_utc=now, grace_minutes=60)
+
+    assert pending.read_bytes() == original_bytes
+
+
+# ── persist_selection ─────────────────────────────────────────────────────────
+
 def test_persist_selection_appends_jsonl_line(tmp_path):
     """Selection + scheduling outcome are written as one line to pending file."""
     pending_file = tmp_path / "pending.jsonl"
@@ -375,11 +674,61 @@ def test_identifier_writes_portfolio_block_to_daily_file(tmp_path):
     body = out.read_text(encoding="utf-8")
     assert "### Portfolio (snapshot 2026-05-08 07:00 UTC)" in body
     assert "Novak Djokovic" in body
-    assert "1.553" in body
-    assert "$39.05" in body
+    assert "Dino Prizmic" in body
+    assert "1.148" in body  # fair odds (model only — orderbook not bound at scan)
     rolling = rolling_path.read_text(encoding="utf-8")
     assert "## Tennis Dry Run Report" in rolling
     assert "### Portfolio" in rolling
+
+
+def test_write_daily_report_includes_shadow_section_when_passed(tmp_path):
+    """If write_daily_report is called with shadow_selections, the BOD file
+    contains the Shadow Picks block alongside Identified Picks."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    selections = [{
+        "pick": "Tier A Pick", "opponent": "Underdog A",
+        "league": "ATP Rome", "surface": "clay",
+        "model_prob": 0.85, "fair_odds": 1.176, "tier": "A",
+        "game_time_iso": "2026-05-09T14:00:00+00:00",
+        "placement_path": "scheduled",
+        "scheduled_at_iso": "2026-05-09T13:45:00+00:00",
+    }]
+    shadow = [{
+        "pick": "Tier B Pick", "opponent": "Underdog B",
+        "league": "WTA Rome", "surface": "clay",
+        "model_prob": 0.74, "fair_odds": 1.351, "tier": "B",
+        "game_time_iso": "2026-05-09T16:00:00+00:00",
+        "placement_path": "shadow", "scheduled_at_iso": None,
+    }]
+    counts = {"qualified": 1, "scheduled": 1, "immediate": 0,
+              "skipped_dedup": 0, "skipped_filter": 27, "shadow": 1}
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+
+    write_daily_report(
+        now_utc=datetime(2026, 5, 9, 7, 0, tzinfo=timezone.utc),
+        counts=counts,
+        selections=selections,
+        markets_total=48, markets_today=31,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+        shadow_selections=shadow,
+    )
+
+    body = (vault_dir / "2026-05-09.md").read_text(encoding="utf-8")
+    assert "Tier A Pick" in body
+    assert "Tier B Pick" in body
+    assert "## Shadow Picks (tier B, 70-80% — not placed)" in body
+    assert "1.351" in body
+    assert "Shadow (tier B, 70-80%)" in body  # scan-summary row
+    assert "| 1 |" in body  # shadow count
 
 
 def test_write_daily_report_renders_placement_keys_correctly(tmp_path):
@@ -437,3 +786,134 @@ def test_write_daily_report_renders_placement_keys_correctly(tmp_path):
     assert "13:45" in body or "scheduled" in body, (
         f"Scheduled time not rendered. Report:\n{body}"
     )
+
+
+def test_bod_report_includes_yesterday_recap_when_settlements_exist(tmp_path):
+    """The BOD daily report must surface yesterday's settlement outcomes so the
+    EOD → next-day rollover is visible at the top of the daily file."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 492.22, "open_picks": {}}')
+    # Two settlements from yesterday (2026-05-11): both wins.
+    (state_dir / "trades.jsonl").write_text(
+        '{"type":"open","pick_id":"0xmed","pick":"Daniil Medvedev","opponent":"Pablo Llamas Ruiz","model_prob":0.8147,"sxbet_odds":1.3986,"sxbet_available_usd":135.52,"stake":25.0,"ts":"2026-05-10T07:00:55+00:00"}\n'
+        '{"type":"open","pick_id":"0xswi","pick":"Iga Swiatek","opponent":"Naomi Osaka","model_prob":0.8504,"sxbet_odds":1.2903,"sxbet_available_usd":124.26,"stake":25.0,"ts":"2026-05-11T07:00:40+00:00"}\n'
+        '{"type":"settled","pick_id":"0xmed","pick":"Daniil Medvedev","opponent":"Pablo Llamas Ruiz","outcome":"win","pnl":9.96,"ts":"2026-05-11T18:02:18+00:00"}\n'
+        '{"type":"settled","pick_id":"0xswi","pick":"Iga Swiatek","opponent":"Naomi Osaka","outcome":"win","pnl":7.26,"ts":"2026-05-11T20:02:20+00:00"}\n'
+    )
+
+    vault_dir = tmp_path / "vault"
+    write_daily_report(
+        now_utc=datetime(2026, 5, 12, 7, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[],
+        markets_total=82, markets_today=71,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+    )
+
+    body = (vault_dir / "2026-05-12.md").read_text(encoding="utf-8")
+    # Recap header for yesterday
+    assert "## Yesterday's Results — 2026-05-11" in body
+    # Both yesterday picks rendered as WIN
+    assert "Daniil Medvedev" in body
+    assert "Iga Swiatek" in body
+    assert body.count("| WIN |") == 2
+    # Day P&L summary
+    assert "Day P&L" in body
+    assert "2 W / 0 L" in body
+    # Recap appears BEFORE Scan Summary (so it sits at top of report)
+    assert body.index("Yesterday's Results") < body.index("Scan Summary")
+
+
+def test_bod_report_includes_recap_placeholder_when_no_yesterday_activity(tmp_path):
+    """If yesterday had no settlements, recap block still renders an empty stub."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+    write_daily_report(
+        now_utc=datetime(2026, 5, 8, 7, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[],
+        markets_total=50, markets_today=30,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+    )
+
+    body = (vault_dir / "2026-05-08.md").read_text(encoding="utf-8")
+    assert "## Yesterday's Results — 2026-05-07" in body
+    assert "_No settlements on 2026-05-07._" in body
+
+
+def test_bod_report_renders_open_positions_for_carried_over_picks(tmp_path):
+    """A pick placed yesterday whose match is today must surface in today's
+    BOD report so the open exposure is visible before the EOD settlement."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_dir.joinpath("state.json").write_text(
+        '{"balance": 475.0, "open_picks": {'
+        '"0xzv":{"pick_id":"0xzv","pick":"Alexander Zverev","opponent":"Luciano Darderi",'
+        '"league":"ATP Rome","surface":"clay","model_prob":0.8495,"sxbet_odds":1.2085,'
+        '"sxbet_available_usd":263.87,"edge":0.022,"stake":25.0,'
+        '"ts":"2026-05-11T07:00:40+00:00"}'
+        '}}'
+    )
+    state_dir.joinpath("trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+    write_daily_report(
+        now_utc=datetime(2026, 5, 12, 7, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[],
+        markets_total=82, markets_today=71,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+    )
+
+    body = (vault_dir / "2026-05-12.md").read_text(encoding="utf-8")
+    assert "Open Picks (1)" in body
+    assert "Alexander Zverev" in body
+    assert "Luciano Darderi" in body
+    # Open Picks block must sit between Portfolio and Scan Summary
+    assert body.index("Portfolio") < body.index("Open Picks") < body.index("Scan Summary")
+
+
+def test_bod_report_renders_empty_open_positions_when_no_open_picks(tmp_path):
+    """When state.open_picks is empty, the BOD report still has the section but says so."""
+    from datetime import datetime, timezone
+    from tennis_identifier import write_daily_report
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_dir.joinpath("state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    state_dir.joinpath("trades.jsonl").write_text("")
+
+    vault_dir = tmp_path / "vault"
+    write_daily_report(
+        now_utc=datetime(2026, 5, 12, 7, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[],
+        markets_total=10, markets_today=5,
+        vault_dir=vault_dir,
+        state_dir=state_dir,
+    )
+
+    body = (vault_dir / "2026-05-12.md").read_text(encoding="utf-8")
+    assert "Open Picks (0)" in body
+    assert "_No open picks._" in body

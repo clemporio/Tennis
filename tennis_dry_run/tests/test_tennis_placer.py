@@ -163,6 +163,10 @@ def test_place_pick_calls_executor_and_updates_state_on_pass(state_file, pending
     assert pick_context["pick_id"] == "0xabc"
     assert pick_context["sxbet_odds"] == 1.45
     assert pick_context["model_prob"] == 0.85
+    # game_time from the pending selection must be carried into pick_context so
+    # downstream renderers (Open Picks block) can show actual match time, not
+    # placement timestamp.
+    assert pick_context["game_time"] == 1746540000
 
     # State.open_picks now contains the new entry
     state = json.loads(state_file.read_text(encoding="utf-8"))

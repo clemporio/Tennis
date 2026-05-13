@@ -38,6 +38,36 @@ from tennis_dry_run import (  # noqa: E402
     scrape_scheduled_matches,
 )
 
+# Shadow-tier threshold: picks in [SHADOW_MIN_CONFIDENCE, MIN_CONFIDENCE) are
+# tagged tier="B" and recorded but NOT scheduled for placement. Used to gather
+# a paper trail of what a lower-confidence model would have selected, against
+# which we can compare hit rate / theoretical PnL without placement risk.
+SHADOW_MIN_CONFIDENCE = float(os.getenv("SHADOW_MIN_CONFIDENCE", "0.70"))
+
+# Hard reject any market whose league name matches these (case-insensitive)
+# substrings. Prior backtest showed the model can't predict challenger /
+# qualifying / ITF reliably (sparse Elo, lower-tier players, different
+# volatility), and the training data is tour-only so these would be OOD.
+EXCLUDED_LEAGUE_SUBSTRINGS = ("challenger", "qualifying", "qualif.", " q1", " q2",
+                              " q3", "itf ")
+
+
+def _is_excluded_league(league: str) -> bool:
+    """True if `league` matches any excluded-tier substring."""
+    if not league:
+        return False
+    low = league.lower()
+    return any(sub in low for sub in EXCLUDED_LEAGUE_SUBSTRINGS)
+
+
+def _is_on_date(ts_iso: str, target) -> bool:
+    if not ts_iso:
+        return False
+    try:
+        return datetime.fromisoformat(ts_iso).astimezone(timezone.utc).date() == target
+    except Exception:
+        return False
+
 log = logging.getLogger("tennis_identifier")
 
 
@@ -91,6 +121,9 @@ def evaluate_market(
     player_b = market["player_b"]
     league = market.get("league", "")
 
+    if _is_excluded_league(league):
+        return None
+
     surface = _detect_surface(league)
 
     la, _ = _extract_last_and_initial(player_a)
@@ -123,12 +156,14 @@ def evaluate_market(
     else:
         pick_name, opponent_name, pick_prob = player_b, player_a, prob_b
 
-    if pick_prob < MIN_CONFIDENCE:
+    if pick_prob < SHADOW_MIN_CONFIDENCE:
         return None
 
     fair_odds = round(1.0 / pick_prob, 3)
     if not (MIN_ODDS <= fair_odds <= MAX_ODDS):
         return None
+
+    tier = "A" if pick_prob >= MIN_CONFIDENCE else "B"
 
     return {
         "pick_id": market_hash,
@@ -139,6 +174,7 @@ def evaluate_market(
         "round": match_round,
         "model_prob": round(pick_prob, 4),
         "fair_odds": fair_odds,
+        "tier": tier,
         "market_hash": market_hash,
         "market_player_a": player_a,
         "is_pick_outcome_one": pick_name.strip() == player_a.strip(),
@@ -194,6 +230,61 @@ def persist_selection(
         f.write(json.dumps(record, default=str) + "\n")
 
 
+def prune_stale_pending(
+    pending_file: Path,
+    now_utc: datetime,
+    grace_minutes: int = 60,
+) -> dict:
+    """Drop pending selections whose game_time is past `now - grace_minutes`.
+
+    The placer fires at game_time - lead_min and the match itself runs after
+    game_time. Once game_time + grace has passed there is no downstream reader
+    for the entry — pruning prevents `pending_selections.jsonl` from growing
+    unbounded across days.
+
+    Atomic: writes survivors to <file>.tmp, then `os.replace`s into place.
+    Malformed JSON lines are silently dropped. Entries without `game_time`
+    are kept (unknown timing → don't drop).
+
+    Returns: {"kept": int, "pruned": int, "pruned_picks": list[str]}.
+    """
+    if not pending_file.exists():
+        return {"kept": 0, "pruned": 0, "pruned_picks": []}
+    cutoff_ts = (now_utc - timedelta(minutes=grace_minutes)).timestamp()
+    kept_lines: list[str] = []
+    pruned_picks: list[str] = []
+    for raw in pending_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        gt = row.get("game_time")
+        if gt is None:
+            kept_lines.append(line)
+            continue
+        try:
+            gt_val = float(gt)
+        except (TypeError, ValueError):
+            kept_lines.append(line)
+            continue
+        if gt_val >= cutoff_ts:
+            kept_lines.append(line)
+        else:
+            pruned_picks.append(row.get("pick", "?"))
+    tmp = pending_file.with_suffix(pending_file.suffix + ".tmp")
+    payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, pending_file)
+    return {
+        "kept": len(kept_lines),
+        "pruned": len(pruned_picks),
+        "pruned_picks": pruned_picks,
+    }
+
+
 def write_daily_report(
     now_utc: datetime,
     counts: dict,
@@ -203,10 +294,12 @@ def write_daily_report(
     vault_dir: Path,
     state_dir: Path,
     rolling_path: Optional[Path] = None,
+    shadow_selections: Optional[list[dict]] = None,
 ) -> Path:
     """Write daily BOD report + refresh rolling file.
 
-    Daily file: <vault_dir>/YYYY-MM-DD.md — Portfolio + Identified Picks.
+    Daily file: <vault_dir>/YYYY-MM-DD.md — Portfolio + Identified Picks +
+        Shadow Picks (tier B, captured but not placed).
     Rolling file (optional): single file rewritten with current snapshot.
     """
     from tennis_kelly import replay_three_bankrolls
@@ -217,6 +310,8 @@ def write_daily_report(
         render_performance_block,
         render_backtest_comparison_block,
         render_identified_picks_block,
+        render_shadow_picks_block,
+        render_yesterday_recap_block,
     )
 
     vault_dir = Path(vault_dir)
@@ -252,6 +347,14 @@ def write_daily_report(
     replay = replay_three_bankrolls(settled, placed, starting_balance=500.0,
                                     today=now_utc.date())
 
+    yesterday = now_utc.date() - timedelta(days=1)
+    settled_yesterday = [
+        s for s in settled
+        if _is_on_date(s.get("ts", ""), yesterday)
+    ]
+    placed_lookup = {p["pick_id"]: p for p in placed if "pick_id" in p}
+    open_picks = state.get("open_picks", {}) or {}
+
     # Daily file
     lines: list[str] = [
         "---",
@@ -264,7 +367,9 @@ def write_daily_report(
         "",
         f"BOD run timestamp: {now_utc.replace(microsecond=0).isoformat()}",
         "",
+        render_yesterday_recap_block(yesterday, settled_yesterday, placed_lookup),
         render_portfolio_block(replay, now_utc),
+        render_open_picks_block(open_picks, replay),
         "## Scan Summary",
         "",
         "| Metric | Value |",
@@ -274,10 +379,12 @@ def write_daily_report(
         f"| Qualified | {counts.get('qualified', 0)} |",
         f"| Scheduled (`at`) | {counts.get('scheduled', 0)} |",
         f"| Placed immediately | {counts.get('immediate', 0)} |",
+        f"| Shadow (tier B, 70-80%) | {counts.get('shadow', 0)} |",
         f"| Skipped (dedup) | {counts.get('skipped_dedup', 0)} |",
         f"| Skipped (filter) | {counts.get('skipped_filter', 0)} |",
         "",
         render_identified_picks_block(selections),
+        render_shadow_picks_block(shadow_selections or []),
         "---",
         f"_Generated by `tennis_identifier.py` on the LXII Capital VPS._",
         "",
@@ -286,7 +393,6 @@ def write_daily_report(
 
     # Rolling file (full re-render)
     if rolling_path is not None:
-        open_picks = state.get("open_picks", {}) or {}
         rolling_lines: list[str] = [
             "---",
             "tags: [tennis, dry-run, report]",
@@ -346,6 +452,10 @@ def main() -> int:
         "PENDING_SELECTIONS_FILE",
         str(STATE_DIR / "pending_selections.jsonl"),
     ))
+    shadow_file = Path(os.getenv(
+        "SHADOW_SELECTIONS_FILE",
+        str(STATE_DIR / "shadow_selections.jsonl"),
+    ))
     vault_dir_env = os.getenv(
         "OBSIDIAN_VAULT_DIR",
         "/opt/vps-hub/vault/finance-brain/10-Projects/Tennis-Automated/Daily-Reports",
@@ -355,10 +465,28 @@ def main() -> int:
     placer_path = Path(__file__).resolve().parent / "tennis_placer.py"
     venv_python = os.getenv("PLACER_PYTHON", sys.executable)
     placer_cmd = [venv_python, str(placer_path)]
+    shadow_placer_path = Path(__file__).resolve().parent / "tennis_shadow_placer.py"
+    shadow_placer_cmd = [venv_python, str(shadow_placer_path)]
+    shadow_lead_min = int(os.getenv("SHADOW_PLACEMENT_LEAD_MIN", "90"))
 
     now_utc = datetime.now(timezone.utc)
     log.info("Identifier run starting at %s UTC (lead_min=%d)",
              now_utc.isoformat(), lead_min)
+
+    prune_grace_min = int(os.getenv("PENDING_PRUNE_GRACE_MIN", "60"))
+    # shadow_placements.jsonl is an append-only audit log (keyed by ts, not
+    # game_time) — don't prune it. It grows ~one line per tier-B pick per day.
+    for label, fpath in (("pending", pending_file), ("shadow", shadow_file)):
+        try:
+            r = prune_stale_pending(fpath, now_utc, grace_minutes=prune_grace_min)
+            if r["pruned"]:
+                log.info(
+                    "Pruned %d stale %s selection(s) (kept=%d): %s",
+                    r["pruned"], label, r["kept"],
+                    ", ".join(r["pruned_picks"]),
+                )
+        except Exception as exc:
+            log.warning("%s prune failed: %s", label, exc)
 
     sxbet = TennisSXBet()
     try:
@@ -394,8 +522,9 @@ def main() -> int:
     state = load_state()
 
     counts = {"qualified": 0, "scheduled": 0, "immediate": 0,
-              "skipped_dedup": 0, "skipped_filter": 0}
+              "skipped_dedup": 0, "skipped_filter": 0, "shadow": 0}
     selections_for_report: list[dict] = []
+    shadow_for_report: list[dict] = []
 
     for market in today_markets:
         if market["market_hash"] in state.get("open_picks", {}):
@@ -408,6 +537,37 @@ def main() -> int:
             counts["skipped_filter"] += 1
             continue
 
+        game_time_iso = datetime.fromtimestamp(
+            selection["game_time"], tz=timezone.utc
+        ).isoformat()
+
+        if selection.get("tier") == "B":
+            # Shadow track: never placed. Persist the selection, then schedule
+            # an `at` job at T-shadow_lead_min that fires `tennis_shadow_placer`
+            # — fetches the orderbook, runs the same gates as the real placer,
+            # writes a "would_place" / "would_skip" record. Pure observation,
+            # no executor, no state mutation. Drives A/B comparison vs tier-A's
+            # T-15 timing.
+            shadow_outcome = schedule_or_place(
+                selection, now_utc, shadow_lead_min, shadow_placer_cmd,
+            )
+            shadow_outcome["placement_path"] = "shadow"  # override label
+            persist_selection(selection, shadow_outcome, shadow_file)
+            counts["shadow"] += 1
+            shadow_for_report.append({
+                **selection,
+                "game_time_iso": game_time_iso,
+                "placement_path": "shadow",
+                "scheduled_at_iso": shadow_outcome.get("scheduled_at_iso"),
+            })
+            log.info("Shadow selection (tier B): %s vs %s @ %s (prob=%.4f, "
+                     "shadow_fire=%s)",
+                     selection["pick"], selection["opponent"],
+                     game_time_iso, selection["model_prob"],
+                     shadow_outcome.get("scheduled_at_iso") or "now")
+            continue
+
+        # Tier A — placement track.
         counts["qualified"] += 1
         outcome = schedule_or_place(selection, now_utc, lead_min, placer_cmd)
         if outcome["placement_path"] == "scheduled":
@@ -415,9 +575,6 @@ def main() -> int:
         else:
             counts["immediate"] += 1
         persist_selection(selection, outcome, pending_file)
-        game_time_iso = datetime.fromtimestamp(
-            selection["game_time"], tz=timezone.utc
-        ).isoformat()
         selections_for_report.append({
             **selection,
             "game_time_iso": game_time_iso,
@@ -430,9 +587,9 @@ def main() -> int:
 
     log.info(
         "Summary: qualified=%d scheduled=%d immediate=%d "
-        "skipped_dedup=%d skipped_filter=%d",
+        "shadow=%d skipped_dedup=%d skipped_filter=%d",
         counts["qualified"], counts["scheduled"], counts["immediate"],
-        counts["skipped_dedup"], counts["skipped_filter"],
+        counts["shadow"], counts["skipped_dedup"], counts["skipped_filter"],
     )
 
     if vault_dir is not None:
@@ -448,6 +605,7 @@ def main() -> int:
                 vault_dir=vault_dir,
                 state_dir=STATE_DIR,
                 rolling_path=rolling_path,
+                shadow_selections=shadow_for_report,
             )
             log.info("Daily report written: %s", report_path)
             if rolling_path:

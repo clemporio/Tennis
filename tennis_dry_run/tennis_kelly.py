@@ -197,7 +197,7 @@ def replay_three_bankrolls(
                     continue  # orphaned settle row
 
                 stake = stake_info["stake"]
-                won = bool(row.get("won", False))
+                won = str(row.get("outcome", "")).lower() == "win"
 
                 odds = stake_info["entry_odds"]
                 pnl = stake * (odds - 1.0) if won else -stake

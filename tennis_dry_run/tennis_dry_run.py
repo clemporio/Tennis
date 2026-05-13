@@ -442,18 +442,49 @@ def scrape_scheduled_matches() -> list[dict]:
     return matches
 
 
-def scrape_completed_results() -> list[dict]:
+def _read_set_score(cell) -> Optional[int]:
+    """Extract a player's games-won from a TennisExplorer set-score cell.
+
+    A tiebreak set is rendered as `<td class="score">6<sup>10</sup></td>`;
+    `get_text(strip=True)` would yield "610". We drop the `<sup>` so the
+    returned value is the games count, not games concatenated with tiebreak
+    points.
+    """
+    sup = cell.find("sup")
+    if sup is not None:
+        sup.extract()
+    text = cell.get_text(strip=True)
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def scrape_completed_results(target_date=None) -> list[dict]:
     """Scrape completed match results from TennisExplorer.
 
     Looks for matches where score cells contain digits and at least 2 sets
     have been played.  Winner is determined by the player who won more sets
     (a set score >= 6 counts as a won set).
 
+    Args:
+        target_date: Optional `datetime.date` of the day to query. The default
+            URL (`?type=all`) returns "today" in TennisExplorer's local
+            timezone (Europe/Prague), which causes the page to roll over to
+            tomorrow's empty schedule when called late in UTC. Passing an
+            explicit date appends `&year=&month=&day=` and pins the view to
+            that calendar day regardless of when we query.
+
     Returns:
         List of dicts with keys: player_a, player_b, winner, tournament.
     """
+    if target_date is not None:
+        url = (f"{TENNIS_EXPLORER_URL}&year={target_date.year}"
+               f"&month={target_date.month}&day={target_date.day}")
+    else:
+        url = TENNIS_EXPLORER_URL
     try:
-        resp = requests.get(TENNIS_EXPLORER_URL, headers=HEADERS, timeout=20)
+        resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
     except requests.RequestException as exc:
         log.error("Failed to fetch TennisExplorer results: %s", exc)
@@ -517,21 +548,21 @@ def scrape_completed_results() -> list[dict]:
         player_a = re.sub(r"\(\d+\)", "", player_a_raw).strip()
         player_b = re.sub(r"\(\d+\)", "", player_b_raw).strip()
 
-        # Count sets won by each player
+        # Count sets won by each player.
+        # TennisExplorer renders tiebreak set scores as e.g. "6<sup>10</sup>";
+        # get_text would flatten that to "610". Strip <sup> so only the games
+        # count (the 6) is parsed, not the tiebreak points.
         sets_a = 0
         sets_b = 0
         for sc_a, sc_b in zip(score_cells_a, score_cells_b):
-            text_a = sc_a.get_text(strip=True)
-            text_b = sc_b.get_text(strip=True)
-            try:
-                score_a = int(text_a)
-                score_b = int(text_b)
-                if score_a >= 6 and score_a > score_b:
-                    sets_a += 1
-                elif score_b >= 6 and score_b > score_a:
-                    sets_b += 1
-            except ValueError:
+            score_a = _read_set_score(sc_a)
+            score_b = _read_set_score(sc_b)
+            if score_a is None or score_b is None:
                 continue
+            if score_a >= 6 and score_a > score_b:
+                sets_a += 1
+            elif score_b >= 6 and score_b > score_a:
+                sets_b += 1
 
         total_sets = sets_a + sets_b
         if total_sets < 2:

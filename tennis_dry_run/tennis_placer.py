@@ -124,6 +124,7 @@ def place_pick(
         "edge": edge,
         "market_hash": market_hash,
         "is_pick_outcome_one": selection["is_pick_outcome_one"],
+        "game_time": selection.get("game_time"),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
