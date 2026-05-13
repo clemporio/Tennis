@@ -15,7 +15,7 @@ def test_state_balance_equals_journal_sum_after_settle(tmp_path, monkeypatch):
     monkeypatch.setattr(tdr, "STATE_DIR", tmp_path)
     monkeypatch.setattr(tdr, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(tdr, "JOURNAL_FILE", tmp_path / "trades.jsonl")
-    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "daily.jsonl")
+    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "settlements.jsonl")
 
     state = {
         "balance": 500.0, "total_pnl": 0.0, "wins": 0, "losses": 0,
@@ -55,7 +55,7 @@ def test_retired_match_settles_to_zero_pnl(tmp_path, monkeypatch):
     monkeypatch.setattr(tdr, "STATE_DIR", tmp_path)
     monkeypatch.setattr(tdr, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(tdr, "JOURNAL_FILE", tmp_path / "trades.jsonl")
-    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "daily.jsonl")
+    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "settlements.jsonl")
 
     state = {
         "balance": 500.0, "total_pnl": 0.0, "wins": 0, "losses": 0,
@@ -86,3 +86,49 @@ def test_retired_match_settles_to_zero_pnl(tmp_path, monkeypatch):
     assert len(settled) == 1
     assert settled[0]["outcome"] == "retired"
     assert settled[0]["pnl"] == 0.0
+
+
+def test_settle_writes_audit_entry_to_settlements_jsonl_with_settle_pass_fields(tmp_path, monkeypatch):
+    """Per-settle audit row uses settle_pass_* field names and lands in settlements.jsonl."""
+    import json
+    from unittest.mock import patch
+
+    import tennis_dry_run as tdr
+    monkeypatch.setattr(tdr, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(tdr, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tdr, "JOURNAL_FILE", tmp_path / "trades.jsonl")
+    monkeypatch.setattr(tdr, "DAILY_FILE", tmp_path / "settlements.jsonl")
+
+    state = {
+        "balance": 500.0, "total_pnl": 0.0, "wins": 0, "losses": 0,
+        "open_picks": {
+            "p1": {"pick_id": "p1", "pick": "Alpha A.", "opponent": "Bravo B.",
+                   "stake": 25.0, "sxbet_odds": 1.5, "mode": "dry_run",
+                   "is_pick_outcome_one": True, "model_prob": 0.85},
+        },
+    }
+    fake = [{"player_a": "Alpha A.", "player_b": "Bravo B.",
+             "winner": "Alpha A.", "tournament": "Rome", "retired": False}]
+
+    class _Exec:
+        def reconcile_pick(self, pick, won):
+            return {"outcome": "win" if won else "loss",
+                    "pnl": 25.0 * 0.5 if won else -25.0, "mode": "dry_run"}
+
+    with patch.object(tdr, "scrape_completed_results", return_value=fake):
+        new_state, settled_ids = tdr.run_settle(state, _Exec())
+
+    audit_path = tmp_path / "settlements.jsonl"
+    assert audit_path.exists(), "audit log should be written to settlements.jsonl"
+
+    rows = [json.loads(ln) for ln in audit_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry["settle_pass_count"] == 1
+    assert entry["settle_pass_wins"] == 1
+    assert entry["settle_pass_losses"] == 0
+    assert entry["settle_pass_retired"] == 0
+    assert entry["settle_pass_pnl"] == 12.5  # 25 * 0.5
+    # Old field names are gone.
+    assert "daily_pnl" not in entry
+    assert "daily_wins" not in entry

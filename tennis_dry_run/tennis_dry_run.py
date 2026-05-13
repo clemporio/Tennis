@@ -47,7 +47,7 @@ STATE_DIR = Path(__file__).resolve().parent / ".tmp"
 STATE_FILE = STATE_DIR / "state.json"
 JOURNAL_FILE = STATE_DIR / "trades.jsonl"
 SKIPPED_FILE = STATE_DIR / "skipped.jsonl"
-DAILY_FILE = STATE_DIR / "daily.jsonl"
+DAILY_FILE = STATE_DIR / "settlements.jsonl"  # per-settle audit log (was daily.jsonl)
 ELO_FILE = STATE_DIR / "tennis_data" / "elo_ratings.json"
 
 SCAN_TIMES_UTC = [7, 14]
@@ -1314,23 +1314,26 @@ def run_settle(state: dict, executor: TennisExecutor) -> tuple[dict, set[str]]:
         open_picks.pop(pick_id, None)
     state["open_picks"] = open_picks
 
-    # Append daily summary if any settlements occurred
+    # Append per-settle audit entry if any settlements occurred in this pass.
+    # NOTE: this row reflects THIS settle pass only, not a per-day rollup —
+    # multiple rows may share the same `date` across daily passes.
     if settlements:
         today_str = now_utc.strftime("%Y-%m-%d")
-        daily_entry = {
+        audit_entry = {
             "date": today_str,
-            "settled_count": len(settlements),
-            "wins": sum(1 for s in settlements if s["outcome"] == "win"),
-            "losses": sum(1 for s in settlements if s["outcome"] == "loss"),
-            "daily_pnl": round(sum(s["pnl"] for s in settlements), 2),
+            "settle_pass_count": len(settlements),
+            "settle_pass_wins": sum(1 for s in settlements if s["outcome"] == "win"),
+            "settle_pass_losses": sum(1 for s in settlements if s["outcome"] == "loss"),
+            "settle_pass_retired": sum(1 for s in settlements if s["outcome"] == "retired"),
+            "settle_pass_pnl": round(sum(s["pnl"] for s in settlements), 2),
             "balance": round(state["balance"], 2),
             "total_pnl": round(state["total_pnl"], 2),
             "ts": now_utc.isoformat(),
         }
-        append_journal(daily_entry, DAILY_FILE)
+        append_journal(audit_entry, DAILY_FILE)
         log.info(
-            "run_settle: daily summary — %d settled, pnl=%.2f",
-            len(settlements), daily_entry["daily_pnl"],
+            "run_settle: settle-pass audit — %d settled, pnl=%.2f",
+            len(settlements), audit_entry["settle_pass_pnl"],
         )
 
     state["last_settle"] = now_utc.isoformat()
