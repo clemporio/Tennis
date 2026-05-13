@@ -357,6 +357,14 @@ def write_daily_report(
     placed_lookup = {p["pick_id"]: p for p in placed if "pick_id" in p}
     open_picks = state.get("open_picks", {}) or {}
 
+    # `Qualified` reflects what the identifier itself surfaced this run, but
+    # the bot's scan-loop can open picks between the identifier loading state
+    # and writing the report (race observed 2026-05-13: Gauff opened by bot
+    # ~24s after identifier started, was invisible in the headline count).
+    # Surface the gap explicitly. Clamped to zero — bot may also have settled
+    # picks since the identifier's count was taken, so the diff can go negative.
+    bot_opened = max(0, len(open_picks) - counts.get("qualified", 0))
+
     # Daily file
     lines: list[str] = [
         "---",
@@ -379,6 +387,7 @@ def write_daily_report(
         f"| Markets total | {markets_total} |",
         f"| Markets today | {markets_today} |",
         f"| Qualified | {counts.get('qualified', 0)} |",
+        f"| Bot-opened (not counted in Qualified) | {bot_opened} |",
         f"| Scheduled (`at`) | {counts.get('scheduled', 0)} |",
         f"| Placed immediately | {counts.get('immediate', 0)} |",
         f"| Shadow (tier B, 70-80%) | {counts.get('shadow', 0)} |",

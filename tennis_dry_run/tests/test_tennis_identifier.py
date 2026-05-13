@@ -917,3 +917,80 @@ def test_bod_report_renders_empty_open_positions_when_no_open_picks(tmp_path):
     body = (vault_dir / "2026-05-12.md").read_text(encoding="utf-8")
     assert "Open Picks (0)" in body
     assert "_No open picks._" in body
+
+
+def test_write_daily_report_refetches_state_before_render(tmp_path, monkeypatch):
+    """Identifier loads state once at top of main(). If the bot writes a new
+    open pick between then and the report write, the report MUST see it.
+    Simulate this by mutating state.json between the calls."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import tennis_identifier as ti
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_file = state_dir / "state.json"
+    state_file.write_text(json.dumps({"open_picks": {}}), encoding="utf-8")
+    (state_dir / "trades.jsonl").write_text("", encoding="utf-8")
+
+    vault = tmp_path / "vault"
+    now = datetime(2026, 5, 13, 7, 0, 0, tzinfo=timezone.utc)
+
+    # Simulate the bot writing a new open pick AFTER identifier loaded state.
+    state_file.write_text(json.dumps({
+        "open_picks": {
+            "p1": {"pick": "Coco Gauff", "opponent": "Sorana Cirstea",
+                   "league": "WTA Rome", "sxbet_odds": 1.4,
+                   "model_prob": 0.86, "sxbet_available_usd": 90,
+                   "edge": 0.15, "stake": 25.0,
+                   "ts": "2026-05-13T07:00:30+00:00"},
+        },
+    }), encoding="utf-8")
+
+    out = ti.write_daily_report(
+        now_utc=now, counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                              "shadow": 0, "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[], markets_total=0, markets_today=0,
+        vault_dir=vault, state_dir=state_dir,
+    )
+    body = Path(out).read_text(encoding="utf-8")
+    assert "Coco Gauff" in body, "Gauff was opened after main() loaded state; report must re-read state before write"
+    assert "Open Picks (1)" in body
+
+
+def test_write_daily_report_annotates_bot_opened_picks_not_in_identifier_counts(tmp_path):
+    """When state.open_picks has entries the identifier didn't 'Qualify',
+    the Scan Summary must include a 'Bot-opened (not counted in Qualified)' row
+    so the operator sees that the headline count under-reports the day's positions."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import tennis_identifier as ti
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_file = state_dir / "state.json"
+    # Bot opened p1 just before identifier ran; identifier qualified zero markets.
+    state_file.write_text(json.dumps({
+        "open_picks": {
+            "p1": {"pick": "Coco Gauff", "opponent": "Sorana Cirstea",
+                   "league": "WTA Rome", "sxbet_odds": 1.4,
+                   "model_prob": 0.86, "sxbet_available_usd": 90,
+                   "edge": 0.15, "stake": 25.0,
+                   "ts": "2026-05-13T07:00:30+00:00"},
+        },
+    }), encoding="utf-8")
+    (state_dir / "trades.jsonl").write_text("", encoding="utf-8")
+
+    out = ti.write_daily_report(
+        now_utc=datetime(2026, 5, 13, 7, 0, 0, tzinfo=timezone.utc),
+        counts={"qualified": 0, "scheduled": 0, "immediate": 0,
+                "shadow": 0, "skipped_dedup": 0, "skipped_filter": 0},
+        selections=[], markets_total=0, markets_today=0,
+        vault_dir=tmp_path / "vault", state_dir=state_dir,
+    )
+    body = Path(out).read_text(encoding="utf-8")
+    # The Scan Summary should surface that 1 pick exists in open_picks
+    # without having been counted in Qualified.
+    assert "Bot-opened" in body, f"expected 'Bot-opened' annotation in Scan Summary, got:\n{body[:2000]}"
