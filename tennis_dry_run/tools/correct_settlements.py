@@ -94,21 +94,31 @@ def correct_journal(journal_path: Path) -> int:
     return appended
 
 
-def _correction_deltas(rows: list[dict]) -> dict:
+def _correction_deltas(rows: list[dict], already_applied: set[str] | None = None) -> dict:
     """For each correction, compute the delta vs the original wrong settle:
     - pnl delta = corrected pnl - original wrong pnl (applied to balance)
     - wins/losses delta = swap counts implied by outcome flip
 
-    Returns aggregate balance_delta, wins_delta, losses_delta.
+    Corrections whose `corrects` ts is in `already_applied` are skipped, so
+    the same correction is never double-applied across reruns. The
+    `applied_ts` list in the return value reports the `corrects` ts values
+    actually consumed in this call.
+
+    Returns aggregate balance_delta, wins_delta, losses_delta, applied_ts.
     """
+    already_applied = already_applied or set()
     settled_by_ts = {r.get("ts"): r for r in rows if r.get("type") == "settled"}
     balance_delta = 0.0
     wins_delta = 0
     losses_delta = 0
+    applied_ts: list[str] = []
     for r in rows:
         if r.get("type") != "settled_correction":
             continue
-        wrong = settled_by_ts.get(r.get("corrects"))
+        corrects = r.get("corrects")
+        if corrects in already_applied:
+            continue
+        wrong = settled_by_ts.get(corrects)
         if wrong is None:
             continue
         balance_delta += float(r["pnl"]) - float(wrong["pnl"])
@@ -118,10 +128,12 @@ def _correction_deltas(rows: list[dict]) -> dict:
         elif wrong["outcome"] == "loss" and r["outcome"] == "win":
             wins_delta += 1
             losses_delta -= 1
+        applied_ts.append(corrects)
     return {
         "balance_delta": balance_delta,
         "wins_delta": wins_delta,
         "losses_delta": losses_delta,
+        "applied_ts": applied_ts,
     }
 
 
@@ -132,18 +144,24 @@ def recompute_state(journal_path: Path, state_path: Path,
     original wrong settle rows they reference. Writes the file. Returns
     the new state dict.
 
+    Idempotent: each correction's `corrects` ts is recorded in
+    `state["applied_corrections"]` after being applied; subsequent reruns
+    skip those entries so the balance does not drift on re-execution.
+
     `starting_balance` is retained for API stability but unused: the existing
     state's balance is the authoritative pre-correction value (the live
     journal contains many more settled rows than tests reproduce, so
     recomputing from scratch is unsafe).
     """
     rows = _read_jsonl(journal_path)
-    deltas = _correction_deltas(rows)
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    already_applied = set(state.get("applied_corrections", []) or [])
+    deltas = _correction_deltas(rows, already_applied=already_applied)
     state["balance"] = round(float(state.get("balance", 0.0)) + deltas["balance_delta"], 4)
     state["total_pnl"] = round(float(state.get("total_pnl", 0.0)) + deltas["balance_delta"], 4)
     state["wins"] = int(state.get("wins", 0)) + deltas["wins_delta"]
     state["losses"] = int(state.get("losses", 0)) + deltas["losses_delta"]
+    state["applied_corrections"] = sorted(already_applied | set(deltas["applied_ts"]))
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state
 

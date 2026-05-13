@@ -105,3 +105,26 @@ def test_recompute_state_after_correction(tmp_path):
     assert new_state["total_pnl"] == pytest.approx(-24.39, abs=0.01)
     assert new_state["wins"] == 3
     assert new_state["losses"] == 2
+
+
+def test_recompute_state_is_idempotent(tmp_path):
+    """Running correct_journal + recompute_state twice must not double-apply
+    the correction deltas to state.balance / wins / losses."""
+    journal = tmp_path / "trades.jsonl"
+    state_path = tmp_path / "state.json"
+    _write_jsonl(journal, [ZVEREV_OPEN, RUBLEV_OPEN, ZVEREV_WRONG_SETTLED, RUBLEV_WRONG_SETTLED])
+    state_path.write_text(json.dumps({
+        "balance": 472.4346, "total_pnl": -27.5654,
+        "wins": 3, "losses": 2, "total_bets": 6,
+        "open_picks": {}, "today_bets": 0, "today_date": "2026-05-13",
+    }), encoding="utf-8")
+
+    correct_journal(journal)
+    s1 = recompute_state(journal, state_path, starting_balance=500.0)
+    s2 = recompute_state(journal, state_path, starting_balance=500.0)
+
+    assert s2["balance"] == pytest.approx(s1["balance"], abs=1e-9)
+    assert s2["total_pnl"] == pytest.approx(s1["total_pnl"], abs=1e-9)
+    assert s2["wins"] == s1["wins"]
+    assert s2["losses"] == s1["losses"]
+    assert s2["balance"] == pytest.approx(475.61, abs=0.01)
