@@ -70,32 +70,37 @@ def render_portfolio_block(
 
 
 def render_open_picks_block(open_picks: dict, replay: dict) -> str:
-    """Render currently-open picks table (one row per state.open_picks entry).
+    """Render currently-open picks table.
 
-    Stake columns show what each mode would have committed at placement,
-    using each mode's current today_start_balance from the replay output
-    as the locked stake.
+    Picks missing odds/prob render as flagged rows (header count reflects
+    only fully-renderable picks), not silently dropped — silent drops were
+    a reporting accuracy bug. Incomplete rows are visible at the bottom of
+    the table with an `_(incomplete data)_` marker so they aren't lost.
     """
     if not open_picks:
         return "### Open Picks (0)\n\n_No open picks._\n"
 
     from tennis_kelly import day_start_stake
 
+    renderable: list[tuple[str, dict]] = []
+    incomplete: list[tuple[str, dict]] = []
+    for pid, p in open_picks.items():
+        if p.get("sxbet_odds") is None or p.get("model_prob") is None:
+            incomplete.append((pid, p))
+        else:
+            renderable.append((pid, p))
+
+    total = len(renderable)
+
     lines = [
-        f"### Open Picks ({len(open_picks)})",
+        f"### Open Picks ({total})",
         "",
         "| Pick | Opponent | Match (UTC) | League | Entry odds | Edge | Base | ¼K | ½K |",
         "|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
-    for pick_id, p in open_picks.items():
-        odds_raw = p.get("sxbet_odds")
-        if odds_raw is None:
-            continue  # skip picks missing odds (legacy state.json entries)
-        odds = float(odds_raw)
-        prob_raw = p.get("model_prob")
-        if prob_raw is None:
-            continue  # skip picks missing model_prob (legacy state.json entries)
-        prob = float(prob_raw)
+    for pid, p in renderable:
+        odds = float(p["sxbet_odds"])
+        prob = float(p["model_prob"])
         avail = float(p.get("sxbet_available_usd", 0.0))
         edge = float(p.get("edge", prob - 1.0 / odds))
 
@@ -135,6 +140,13 @@ def render_open_picks_block(open_picks: dict, replay: dict) -> str:
             f"{_money_abs(base['stake'])} | {_money_abs(qk['stake'])} | "
             f"{_money_abs(hk['stake'])} |"
         )
+
+    for pid, p in incomplete:
+        lines.append(
+            f"| {p.get('pick','?')} | {p.get('opponent','?')} | — | "
+            f"{p.get('league','?')} | — | — | — | — | — | _(incomplete data)_ "
+        )
+
     lines.append("")
     return "\n".join(lines)
 

@@ -273,8 +273,10 @@ def test_today_settlements_empty():
     assert "_No settlements today._" in out
 
 
-def test_open_picks_block_skips_pick_without_sxbet_odds():
-    """Legacy state.json entries without sxbet_odds should be silently skipped, not crash."""
+def test_open_picks_block_flags_pick_without_sxbet_odds():
+    """Legacy state.json entries without sxbet_odds render as flagged
+    `_(incomplete data)_` rows — not silently dropped. The header count
+    excludes them so it reflects fully-renderable picks only."""
     open_picks = {
         "0xlegacy": {
             "pick_id": "0xlegacy", "pick": "Legacy Pick",
@@ -290,8 +292,11 @@ def test_open_picks_block_skips_pick_without_sxbet_odds():
         "half_kelly": {"today_start_balance": 500.0},
     }
     out = render_open_picks_block(open_picks, replay)
-    # Doesn't crash; renders empty table or skips the row
-    assert "Legacy Pick" not in out
+    # Header count = 0 (no fully-renderable picks)
+    assert "### Open Picks (0)" in out
+    # Incomplete pick is surfaced, not silently lost
+    assert "Legacy Pick" in out
+    assert "(incomplete data)" in out
 
 
 def test_open_picks_block_uses_game_time_for_match_column():
@@ -875,3 +880,24 @@ def test_yesterday_recap_uses_canonical_kelly_stakes_from_replay():
     # kelly_fraction = (0.85*1.5 - 1) / (1.5 - 1) = 0.275/0.5 = 0.55
     # qk_stake = 0.25 * 0.55 * 600 = 82.5; qk_pnl = 82.5 * 0.5 = 41.25
     assert "$+41.25" in out, f"expected $+41.25 in ¼K col, got:\n{out}"
+
+
+def test_open_picks_header_excludes_unrenderable_rows():
+    from tennis_portfolio import render_open_picks_block
+
+    open_picks = {
+        "p1": {"pick": "Alpha", "opponent": "Beta", "sxbet_odds": 1.5,
+               "model_prob": 0.85, "sxbet_available_usd": 100.0, "edge": 0.1},
+        "p2": {"pick": "Gamma", "opponent": "Delta"},  # missing sxbet_odds
+    }
+    replay = {
+        "base": {"today_start_balance": 500.0},
+        "quarter_kelly": {"today_start_balance": 500.0},
+        "half_kelly": {"today_start_balance": 500.0},
+    }
+    out = render_open_picks_block(open_picks, replay)
+    # One renderable row, header should match.
+    assert "### Open Picks (1)" in out
+    # The dropped pick is surfaced as a flagged row, not silently lost.
+    assert "Gamma" in out
+    assert "(incomplete data)" in out
