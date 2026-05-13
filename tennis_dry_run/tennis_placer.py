@@ -159,6 +159,7 @@ def place_pick(
                      state_file=state_file)
 
     place_ts = datetime.now(timezone.utc)
+    result.trade_entry["source"] = "identifier_placer"
 
     def _add(state):
         return _apply_placement_to_state(state, pick_id, result.trade_entry, place_ts)

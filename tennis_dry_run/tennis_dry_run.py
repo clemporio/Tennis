@@ -1206,6 +1206,7 @@ def run_scan(state: dict, executor: TennisExecutor) -> dict:
             continue
 
         trade_entry = result.trade_entry
+        trade_entry["source"] = "run_scan_legacy"
         state.setdefault("open_picks", {})[pick_id] = trade_entry
         append_journal(trade_entry, JOURNAL_FILE)
 
