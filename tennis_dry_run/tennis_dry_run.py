@@ -24,6 +24,15 @@ from bs4 import BeautifulSoup
 
 from tennis_executor import ExecutorConfig, TennisExecutor
 
+# POSIX-only file locking. Production runs on Linux where this enforces
+# mutual exclusion between the bot loop and `at`-spawned placer processes.
+# Windows local dev falls through to non-locked read-modify-write — fine
+# because only one process touches state.json at a time on dev machines.
+if sys.platform != "win32":
+    import fcntl  # type: ignore
+else:
+    fcntl = None  # type: ignore
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -224,6 +233,52 @@ def save_state(state: dict, state_file: Path = STATE_FILE) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
     with state_file.open("w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=2)
+
+
+def update_state_atomic(state_path, mutator):
+    """Read state.json under an exclusive flock, apply ``mutator(state) -> state``,
+    then write back atomically.
+
+    Use this from any process that mutates state. The bot's continuous loop
+    and the placer's `at`-spawned process both touch ``open_picks`` and would
+    otherwise clobber each other (last-writer-wins).
+
+    ``mutator`` receives the current state dict and must return the updated
+    state dict (mutating in place and returning the same reference is fine).
+
+    On POSIX systems, ``fcntl.flock(LOCK_EX)`` serializes concurrent callers.
+    On Windows (local dev only), the lock is a no-op — production VPS is Linux,
+    so real concurrent access only happens there.
+
+    Args:
+        state_path: Path (or string) to the state file.
+        mutator:    Callable that takes the current state dict and returns
+                    the updated dict.
+
+    Returns:
+        The new state dict that was written.
+    """
+    state_path = Path(state_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if not state_path.exists():
+        state_path.write_text("{}", encoding="utf-8")
+    with open(state_path, "r+", encoding="utf-8") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            try:
+                state = json.loads(fh.read() or "{}")
+            except json.JSONDecodeError:
+                state = {}
+            new_state = mutator(state)
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(new_state, indent=2))
+            fh.flush()
+            return new_state
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def append_journal(entry: dict, journal_file: Path = JOURNAL_FILE) -> None:

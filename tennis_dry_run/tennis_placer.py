@@ -31,6 +31,7 @@ from tennis_dry_run import (  # noqa: E402
     append_journal,
     load_state,
     save_state,
+    update_state_atomic,
 )
 
 log = logging.getLogger("tennis_placer")
@@ -73,8 +74,17 @@ def place_pick(
         log.error("place_pick: no pending selection for pick_id=%s", pick_id)
         return {"status": "missing", "reason": "no_pending_selection"}
 
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    if pick_id in state.get("open_picks", {}):
+    # Locked read: under POSIX flock, no other writer can race between this
+    # check and the post-executor add below.
+    already_placed_flag = {"value": False}
+
+    def _check(state):
+        if pick_id in state.get("open_picks", {}):
+            already_placed_flag["value"] = True
+        return state
+
+    update_state_atomic(state_file, _check)
+    if already_placed_flag["value"]:
         log.info("place_pick: %s already in open_picks, skipping", pick_id)
         return {"status": "already_placed"}
 
@@ -134,9 +144,11 @@ def place_pick(
         return _skip(selection, f"executor_block:{result.block_reason}",
                      state_file=state_file)
 
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    state.setdefault("open_picks", {})[pick_id] = result.trade_entry
-    state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    def _add(state):
+        state.setdefault("open_picks", {})[pick_id] = result.trade_entry
+        return state
+
+    update_state_atomic(state_file, _add)
 
     journal_path = trades_file if trades_file is not None else JOURNAL_FILE
     append_journal(result.trade_entry, journal_path)
