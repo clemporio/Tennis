@@ -40,7 +40,7 @@ def test_state_balance_equals_journal_sum_after_settle(tmp_path, monkeypatch):
             return {"outcome": "win" if won else "loss", "pnl": pnl, "mode": "dry_run"}
 
     with patch.object(tdr, "scrape_completed_results", return_value=fake_results):
-        new_state = tdr.run_settle(state, _Exec())
+        new_state, _settled_ids = tdr.run_settle(state, _Exec())
 
     journal_rows = [json.loads(ln) for ln in (tmp_path / "trades.jsonl").read_text().splitlines() if ln.strip()]
     journal_sum = sum(r["pnl"] for r in journal_rows if r.get("type") == "settled")
@@ -75,7 +75,7 @@ def test_retired_match_settles_to_zero_pnl(tmp_path, monkeypatch):
                     "pnl": 25.0 * 0.5 if won else -25.0, "mode": "dry_run"}
 
     with patch.object(tdr, "scrape_completed_results", return_value=fake):
-        new_state = tdr.run_settle(state, _Exec())
+        new_state, _settled_ids = tdr.run_settle(state, _Exec())
 
     assert new_state["balance"] == 500.0  # no change
     assert new_state["wins"] == 0

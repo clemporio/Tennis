@@ -221,18 +221,57 @@ def load_state(state_file: Path = STATE_FILE) -> dict:
     }
 
 
-def save_state(state: dict, state_file: Path = STATE_FILE) -> None:
-    """Write bot state to disk as JSON.
+def save_state(
+    state: dict,
+    state_file: Path = STATE_FILE,
+    *,
+    settled_ids: set[str] | None = None,
+) -> None:
+    """Write bot state to disk as JSON under an exclusive flock.
 
-    Creates parent directories if they do not exist.
+    Routes through :func:`update_state_atomic` so the bot's writes are
+    serialized against the placer's. The bot's in-memory ``state`` is a
+    snapshot taken at the top of ``main()``; meanwhile the placer may have
+    added new picks to disk that the bot doesn't know about. A naive
+    full-replace would clobber those — so we MERGE ``open_picks``:
+
+        final.open_picks = (disk.open_picks ∪ bot.open_picks) − settled_ids
+
+    All other top-level keys (balance, wins, losses, total_pnl, today_bets,
+    today_date, last_scan, last_settle, today_live_stake, …) come from the
+    bot's in-memory snapshot — the bot is the authoritative source for those.
 
     Args:
-        state:      State dict to persist.
-        state_file: Destination path for the JSON file.
+        state:       Bot's in-memory state dict to persist.
+        state_file:  Destination path for the JSON file.
+        settled_ids: Pick ids that the bot's ``run_settle`` removed during
+                     this iteration. They must be removed from disk even if
+                     the on-disk view still shows them as open. ``None`` or
+                     empty means "no removals" (e.g. the post-scan save).
+
+    Returns:
+        None. The write is performed atomically inside the lock.
     """
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    with state_file.open("w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2)
+    settled = set(settled_ids or ())
+
+    def _merge(disk_state: dict) -> dict:
+        # Start from the bot's authoritative top-level view…
+        merged = dict(state)
+        # …then reconcile open_picks specifically.
+        disk_picks = dict(disk_state.get("open_picks", {}) or {})
+        bot_picks = dict(state.get("open_picks", {}) or {})
+        # Union: disk first so bot's view (which carries any fresher
+        # placement metadata observed earlier in this iteration) wins on
+        # collision.
+        merged_picks: dict = dict(disk_picks)
+        merged_picks.update(bot_picks)
+        # Remove anything the bot settled this iteration.
+        for pid in settled:
+            merged_picks.pop(pid, None)
+        merged["open_picks"] = merged_picks
+        return merged
+
+    update_state_atomic(state_file, _merge)
 
 
 def update_state_atomic(state_path, mutator):
@@ -1160,7 +1199,7 @@ def run_scan(state: dict, executor: TennisExecutor) -> dict:
 
 # ── Settle Loop ───────────────────────────────────────────────────────────────
 
-def run_settle(state: dict, executor: TennisExecutor) -> dict:
+def run_settle(state: dict, executor: TennisExecutor) -> tuple[dict, set[str]]:
     """Settle open picks against completed match results.
 
     For each open pick, checks if a completed result is available.  Both the
@@ -1171,12 +1210,16 @@ def run_settle(state: dict, executor: TennisExecutor) -> dict:
         state: Current bot state dict (mutated in place).
 
     Returns:
-        Updated state dict.
+        Tuple ``(state, settled_ids)`` where ``settled_ids`` is the set of
+        pick_ids removed from ``state['open_picks']`` during this call. The
+        caller passes ``settled_ids`` into :func:`save_state` so that those
+        picks are also removed on disk under the lock (the placer's view of
+        disk could still contain them otherwise).
     """
     open_picks: dict = state.get("open_picks", {})
     if not open_picks:
         log.info("run_settle: no open picks — nothing to settle")
-        return state
+        return state, set()
 
     now_utc = datetime.now(timezone.utc)
     log.info("run_settle: checking %d open picks for results", len(open_picks))
@@ -1185,7 +1228,7 @@ def run_settle(state: dict, executor: TennisExecutor) -> dict:
     if not results:
         log.info("run_settle: no completed results found")
         state["last_settle"] = now_utc.isoformat()
-        return state
+        return state, set()
 
     settled_ids: list[str] = []
     settlements: list[dict] = []
@@ -1291,7 +1334,7 @@ def run_settle(state: dict, executor: TennisExecutor) -> dict:
         )
 
     state["last_settle"] = now_utc.isoformat()
-    return state
+    return state, set(settled_ids)
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -1362,8 +1405,8 @@ def main() -> None:
 
                 if should_settle:
                     log.info("main: settle check — %d open picks", open_count)
-                    state = run_settle(state, executor)
-                    save_state(state)
+                    state, settled_ids = run_settle(state, executor)
+                    save_state(state, settled_ids=settled_ids)
 
             time.sleep(60)
 
