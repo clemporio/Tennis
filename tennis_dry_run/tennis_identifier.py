@@ -306,6 +306,59 @@ def prune_stale_pending(
     }
 
 
+def prune_shadow_stale(
+    shadow_file: Path,
+    now_utc: datetime,
+) -> dict:
+    """Prune shadow_selections.jsonl by UTC DATE, not by post-game grace.
+
+    Unlike pending_selections.jsonl (where the placer fires at T-15 and the
+    entry has no downstream reader after game_time + grace), shadow_selections
+    is read by the 22:00 UTC EOD report. A grace-based prune deletes today's
+    completed shadow picks before EOD can resolve them — the 2026-05-11 bug.
+
+    Keeps every entry whose `game_time` falls on today's UTC date; entries
+    without `game_time` are also kept (unknown timing → don't drop).
+
+    Atomic via tempfile + os.replace. Malformed JSON lines dropped silently.
+    """
+    if not shadow_file.exists():
+        return {"kept": 0, "pruned": 0, "pruned_picks": []}
+    today = now_utc.date()
+    kept_lines: list[str] = []
+    pruned_picks: list[str] = []
+    for raw in shadow_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        gt = row.get("game_time")
+        if gt is None:
+            kept_lines.append(line)
+            continue
+        try:
+            gt_dt = datetime.fromtimestamp(float(gt), tz=timezone.utc)
+        except (TypeError, ValueError):
+            kept_lines.append(line)
+            continue
+        if gt_dt.date() == today:
+            kept_lines.append(line)
+        else:
+            pruned_picks.append(row.get("pick", "?"))
+    tmp = shadow_file.with_suffix(shadow_file.suffix + ".tmp")
+    payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, shadow_file)
+    return {
+        "kept": len(kept_lines),
+        "pruned": len(pruned_picks),
+        "pruned_picks": pruned_picks,
+    }
+
+
 def write_daily_report(
     now_utc: datetime,
     counts: dict,

@@ -619,6 +619,99 @@ def test_prune_stale_pending_eats_today_shadow_picks_REGRESSION(tmp_path):
     assert "0xnakashima" in surviving_ids
 
 
+# ── prune_shadow_stale ────────────────────────────────────────────────────────
+
+def test_prune_shadow_stale_keeps_all_of_today_regardless_of_game_time(tmp_path):
+    """All entries whose game_time falls on today's UTC date are kept, even if
+    the match itself was hours ago. EOD at 22:00 UTC needs every tier-B pick
+    fired earlier in the day."""
+    shadow = tmp_path / "shadow_selections.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xa", "pick": "Linda Noskova",
+         "game_time": _ts(2026, 5, 11, 9, 0)},   # today, 13h ago → KEEP
+        {"pick_id": "0xb", "pick": "Brandon Nakashima",
+         "game_time": _ts(2026, 5, 11, 10, 10)},  # today, 12h ago → KEEP
+        {"pick_id": "0xc", "pick": "Future Pick",
+         "game_time": _ts(2026, 5, 11, 23, 30)},  # today, future → KEEP
+        {"pick_id": "0xd", "pick": "Yesterday",
+         "game_time": _ts(2026, 5, 10, 14, 0)},   # yesterday → PRUNE
+    ]
+    _write_pending(shadow, rows)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 3
+    assert result["pruned_picks"] == ["Yesterday"]
+
+    import json
+    surviving = [json.loads(l) for l in shadow.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert {r["pick_id"] for r in surviving} == {"0xa", "0xb", "0xc"}
+
+
+def test_prune_shadow_stale_handles_missing_file(tmp_path):
+    """Missing file → no-op (mirrors prune_stale_pending)."""
+    shadow = tmp_path / "does_not_exist.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result == {"kept": 0, "pruned": 0, "pruned_picks": []}
+    assert not shadow.exists()
+
+
+def test_prune_shadow_stale_keeps_entries_without_game_time(tmp_path):
+    """Defensive: unknown timing → don't drop."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [{"pick_id": "0xnogt", "pick": "Mystery"}]
+    _write_pending(shadow, rows)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["kept"] == 1
+    assert result["pruned"] == 0
+
+
+def test_prune_shadow_stale_skips_malformed_lines(tmp_path):
+    """Malformed JSON dropped silently, valid rows preserved."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    shadow.write_text(
+        '{"pick_id": "0xtoday", "pick": "Today", "game_time": ' + str(_ts(2026, 5, 11, 9)) + '}\n'
+        'not-json\n'
+        '\n'
+        '{"pick_id": "0xyest", "pick": "Yesterday", "game_time": ' + str(_ts(2026, 5, 10, 9)) + '}\n',
+        encoding="utf-8",
+    )
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 1
+
+
+def test_prune_shadow_stale_is_atomic(tmp_path, monkeypatch):
+    """If os.replace fails, the original file is preserved."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xtoday", "pick": "Today", "game_time": _ts(2026, 5, 11, 9)},
+        {"pick_id": "0xyest", "pick": "Yesterday", "game_time": _ts(2026, 5, 10, 9)},
+    ]
+    _write_pending(shadow, rows)
+    original_bytes = shadow.read_bytes()
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr("tennis_identifier.os.replace", boom)
+
+    with pytest.raises(OSError):
+        ti.prune_shadow_stale(shadow, now_utc=now)
+    assert shadow.read_bytes() == original_bytes
+
+
 # ── persist_selection ─────────────────────────────────────────────────────────
 
 def test_persist_selection_appends_jsonl_line(tmp_path):
