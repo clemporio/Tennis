@@ -587,6 +587,38 @@ def test_prune_stale_pending_is_atomic(tmp_path, monkeypatch):
     assert pending.read_bytes() == original_bytes
 
 
+def test_prune_stale_pending_eats_today_shadow_picks_REGRESSION(tmp_path):
+    """REGRESSION: 2026-05-11 bug — identifier's prune (60-min grace) removes
+    today's shadow picks whose match was earlier in the day, so 22:00 UTC EOD
+    sees an empty file and reports 'No shadow picks today' even though tier-B
+    picks fired through the identifier. Documents the broken behaviour;
+    `prune_shadow_stale` (date-based) is the fix.
+    """
+    shadow = tmp_path / "shadow_selections.jsonl"
+    now = datetime(2026, 5, 11, 11, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xnoskova", "pick": "Linda Noskova", "opponent": "Sara Errani",
+         "league": "WTA Rome", "tier": "B",
+         "game_time": _ts(2026, 5, 11, 9, 0)},  # today 09:00 UTC, 2h ago
+        {"pick_id": "0xnakashima", "pick": "Brandon Nakashima", "opponent": "Alex De Minaur",
+         "league": "ATP Rome", "tier": "B",
+         "game_time": _ts(2026, 5, 11, 10, 10)},  # today 10:10 UTC, 50min ago
+    ]
+    _write_pending(shadow, rows)
+
+    ti.prune_stale_pending(shadow, now_utc=now, grace_minutes=60)
+
+    import json
+    surviving = [json.loads(l) for l in shadow.read_text(encoding="utf-8").splitlines() if l.strip()]
+    surviving_ids = {r["pick_id"] for r in surviving}
+    # The bug: today's shadow pick whose match is >60min ago is pruned, even
+    # though EOD at 22:00 UTC still needs it. Nakashima at 10:10 (50min ago)
+    # is within grace and survives this run, but a subsequent identifier run
+    # an hour later would drop him too. By 22:00 UTC EOD both rows are gone.
+    assert "0xnoskova" not in surviving_ids
+    assert "0xnakashima" in surviving_ids
+
+
 # ── persist_selection ─────────────────────────────────────────────────────────
 
 def test_persist_selection_appends_jsonl_line(tmp_path):
