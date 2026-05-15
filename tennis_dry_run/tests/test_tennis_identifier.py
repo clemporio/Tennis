@@ -818,6 +818,53 @@ def test_identifier_writes_portfolio_block_to_daily_file(tmp_path):
     assert "### Portfolio" in rolling
 
 
+# ── main() prune wiring ───────────────────────────────────────────────────────
+
+def test_identifier_main_uses_date_based_prune_for_shadow_file(tmp_path, monkeypatch):
+    """Wiring: main() must invoke prune_shadow_stale (date-based) on the
+    shadow file and prune_stale_pending (grace-based) on the pending file —
+    not the same function for both. Fixes the 2026-05-11 bug where today's
+    completed shadow picks were silently dropped before 22:00 UTC EOD.
+    """
+    import tennis_identifier as ti_mod
+
+    called: list = []
+
+    def fake_prune_shadow_stale(path, now_utc):
+        called.append(("shadow", str(path)))
+        return {"kept": 0, "pruned": 0, "pruned_picks": []}
+
+    real_prune_pending = ti_mod.prune_stale_pending
+    def fake_prune_stale_pending(path, now_utc, grace_minutes=60):
+        called.append(("pending", str(path)))
+        return real_prune_pending(path, now_utc, grace_minutes=grace_minutes)
+
+    class _FakeSX:
+        def __init__(self, *a, **kw): pass
+        def get_all_tennis_markets(self): return []  # triggers early return rc=0
+
+    monkeypatch.setattr(ti_mod, "prune_shadow_stale", fake_prune_shadow_stale)
+    monkeypatch.setattr(ti_mod, "prune_stale_pending", fake_prune_stale_pending)
+    monkeypatch.setattr("tennis_sxbet.TennisSXBet", _FakeSX)
+    monkeypatch.setattr(ti_mod, "STATE_DIR", tmp_path)
+    pending_path = tmp_path / "pending_selections.jsonl"
+    shadow_path = tmp_path / "shadow_selections.jsonl"
+    monkeypatch.setenv("PENDING_SELECTIONS_FILE", str(pending_path))
+    monkeypatch.setenv("SHADOW_SELECTIONS_FILE", str(shadow_path))
+    monkeypatch.setenv("OBSIDIAN_VAULT_DIR", "")
+
+    rc = ti_mod.main()
+    assert rc == 0
+
+    labels = [c[0] for c in called]
+    paths = dict(called)
+    assert labels == ["pending", "shadow"], (
+        f"expected pending then shadow prune, got {labels}"
+    )
+    assert paths["pending"].endswith("pending_selections.jsonl")
+    assert paths["shadow"].endswith("shadow_selections.jsonl")
+
+
 def test_write_daily_report_includes_shadow_section_when_passed(tmp_path):
     """If write_daily_report is called with shadow_selections, the BOD file
     contains the Shadow Picks block alongside Identified Picks."""

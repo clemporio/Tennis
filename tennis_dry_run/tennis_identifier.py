@@ -567,17 +567,29 @@ def main() -> int:
     prune_grace_min = int(os.getenv("PENDING_PRUNE_GRACE_MIN", "60"))
     # shadow_placements.jsonl is an append-only audit log (keyed by ts, not
     # game_time) — don't prune it. It grows ~one line per tier-B pick per day.
-    for label, fpath in (("pending", pending_file), ("shadow", shadow_file)):
-        try:
-            r = prune_stale_pending(fpath, now_utc, grace_minutes=prune_grace_min)
-            if r["pruned"]:
-                log.info(
-                    "Pruned %d stale %s selection(s) (kept=%d): %s",
-                    r["pruned"], label, r["kept"],
-                    ", ".join(r["pruned_picks"]),
-                )
-        except Exception as exc:
-            log.warning("%s prune failed: %s", label, exc)
+    try:
+        r = prune_stale_pending(pending_file, now_utc, grace_minutes=prune_grace_min)
+        if r["pruned"]:
+            log.info(
+                "Pruned %d stale pending selection(s) (kept=%d): %s",
+                r["pruned"], r["kept"], ", ".join(r["pruned_picks"]),
+            )
+    except Exception as exc:
+        log.warning("pending prune failed: %s", exc)
+
+    # Shadow selections use a date-based prune (keep today's UTC date) because
+    # the EOD report at 22:00 UTC needs every tier-B pick from today regardless
+    # of whether the match itself is over. Grace-based pruning would silently
+    # eat today's completed shadow picks (2026-05-11 bug).
+    try:
+        r = prune_shadow_stale(shadow_file, now_utc)
+        if r["pruned"]:
+            log.info(
+                "Pruned %d stale shadow selection(s) (kept=%d): %s",
+                r["pruned"], r["kept"], ", ".join(r["pruned_picks"]),
+            )
+    except Exception as exc:
+        log.warning("shadow prune failed: %s", exc)
 
     sxbet = TennisSXBet()
     try:
