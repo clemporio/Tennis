@@ -117,6 +117,51 @@ def resolve_shadow_outcomes(
     return enriched
 
 
+def append_shadow_outcomes_log(
+    enriched: list[dict],
+    log_file: Path,
+    now_utc: datetime,
+) -> int:
+    """Append resolved shadow rows to `shadow_outcomes.jsonl` with idempotent
+    `(pick_id, status)` dedup. Pending rows are NOT written.
+
+    Returns the number of new rows appended. The log is the single source of
+    truth for tier-B calibration analysis; per-day markdown reports are derived.
+    """
+    resolved = [r for r in enriched if r.get("status") in ("WIN", "LOSS", "RETIRED")]
+    if not resolved:
+        return 0
+
+    existing_keys: set = set()
+    if log_file.exists():
+        for raw in log_file.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except Exception:
+                continue
+            pid = row.get("pick_id")
+            st = row.get("status")
+            if pid and st:
+                existing_keys.add((pid, st))
+
+    resolved_at_iso = now_utc.replace(microsecond=0).isoformat()
+    appended = 0
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "a", encoding="utf-8") as f:
+        for row in resolved:
+            key = (row.get("pick_id"), row.get("status"))
+            if key in existing_keys:
+                continue
+            out_row = {**row, "resolved_at": resolved_at_iso}
+            f.write(json.dumps(out_row, default=str) + "\n")
+            existing_keys.add(key)
+            appended += 1
+    return appended
+
+
 def write_eod_report(
     now_utc: datetime,
     state_dir: Path,
@@ -215,6 +260,16 @@ def write_eod_report(
             log.warning("Shadow outcome scrape failed: %s", exc)
             completed = []
         shadow_today = resolve_shadow_outcomes(shadow_today, completed)
+        try:
+            n = append_shadow_outcomes_log(
+                shadow_today,
+                Path(state_dir) / "shadow_outcomes.jsonl",
+                now_utc,
+            )
+            if n:
+                log.info("Appended %d row(s) to shadow_outcomes.jsonl", n)
+        except Exception as exc:
+            log.warning("shadow_outcomes.jsonl append failed: %s", exc)
 
     replay = replay_three_bankrolls(settled, placed, starting_balance=500.0,
                                     today=today)
