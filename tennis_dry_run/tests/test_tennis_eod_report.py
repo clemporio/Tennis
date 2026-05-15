@@ -534,3 +534,48 @@ def test_eod_idempotent_on_rerun(tmp_path):
 
     body = (vault_dir / "2026-05-08.md").read_text(encoding="utf-8")
     assert body.count("## EOD Performance — 2026-05-08") == 1
+
+
+def test_eod_includes_cumulative_shadow_block_when_log_exists(tmp_path, monkeypatch):
+    """When shadow_outcomes.jsonl exists, EOD section includes the cumulative
+    block in addition to today's per-pick table."""
+    from tennis_eod_report import write_eod_report
+    from datetime import datetime, timezone
+    import json
+
+    monkeypatch.setattr("tennis_dry_run.scrape_completed_results",
+                        lambda target_date=None: [])
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text('{"balance": 500.0, "open_picks": {}}')
+    (state_dir / "trades.jsonl").write_text("")
+    (state_dir / "skipped.jsonl").write_text("")
+    (state_dir / "pending_selections.jsonl").write_text("")
+    (state_dir / "shadow_selections.jsonl").write_text("")
+
+    (state_dir / "shadow_outcomes.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in [
+            {"pick_id": "0xa", "status": "WIN", "theoretical_pnl": 7.25,
+             "model_prob": 0.77, "resolved_at": "2026-05-12T22:00:00+00:00"},
+            {"pick_id": "0xb", "status": "LOSS", "theoretical_pnl": -25.0,
+             "model_prob": 0.73, "resolved_at": "2026-05-12T22:00:00+00:00"},
+            {"pick_id": "0xc", "status": "WIN", "theoretical_pnl": 9.0,
+             "model_prob": 0.78, "resolved_at": "2026-05-13T22:00:00+00:00"},
+        ]) + "\n"
+    )
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+
+    out = write_eod_report(
+        now_utc=datetime(2026, 5, 14, 22, tzinfo=timezone.utc),
+        state_dir=state_dir,
+        vault_dir=vault_dir,
+    )
+
+    body = out.read_text(encoding="utf-8")
+    assert "## Shadow Performance (cumulative)" in body
+    assert "**Resolved: 3" in body
+    assert "Wins: 2" in body
+    assert "Win rate: 66.7%" in body
