@@ -409,6 +409,71 @@ def render_shadow_picks_block(selections: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def render_shadow_cumulative_block(outcomes: list[dict]) -> str:
+    """Render the cumulative shadow performance block from shadow_outcomes.jsonl.
+
+    Dedup by pick_id taking the latest `resolved_at`. Reports aggregate W/L,
+    win rate, theoretical PnL, plus model-prob calibration buckets so the
+    tier-B threshold can be evaluated at a glance.
+    """
+    if not outcomes:
+        return (
+            "## Shadow Performance (cumulative)\n\n"
+            "_No resolved shadow outcomes yet._\n"
+        )
+
+    latest: dict = {}
+    for r in outcomes:
+        pid = r.get("pick_id")
+        if not pid:
+            continue
+        prev = latest.get(pid)
+        if prev is None or r.get("resolved_at", "") > prev.get("resolved_at", ""):
+            latest[pid] = r
+
+    resolved = [r for r in latest.values() if r.get("status") in ("WIN", "LOSS")]
+    wins = sum(1 for r in resolved if r["status"] == "WIN")
+    total_pnl = sum(float(r.get("theoretical_pnl", 0.0)) for r in resolved)
+    wr = (wins / len(resolved) * 100.0) if resolved else 0.0
+
+    lines = ["## Shadow Performance (cumulative)", ""]
+    lines.append(
+        f"**Resolved: {len(resolved)} | Wins: {wins} | "
+        f"Win rate: {wr:.1f}% | Theoretical PnL: {_money(total_pnl)}**"
+    )
+
+    if resolved:
+        buckets = [(0.70, 0.75, "0.70–0.75"), (0.75, 0.80, "0.75–0.80")]
+        bucket_rows = []
+        for lo, hi, label in buckets:
+            in_bucket = [r for r in resolved
+                         if lo <= float(r.get("model_prob", 0.0)) < hi]
+            if not in_bucket:
+                continue
+            b_wins = sum(1 for r in in_bucket if r["status"] == "WIN")
+            b_hit = b_wins / len(in_bucket) * 100.0
+            avg_pred = sum(float(r["model_prob"]) for r in in_bucket) / len(in_bucket) * 100.0
+            delta = b_hit - avg_pred
+            bucket_rows.append((label, len(in_bucket), b_wins, b_hit, avg_pred, delta))
+
+        if bucket_rows:
+            lines += [
+                "",
+                "### By model-prob bucket",
+                "",
+                "| Bucket | Resolved | Wins | Hit rate | Predicted | Δ |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+            for label, n, w, hit, pred, delta in bucket_rows:
+                sign = "+" if delta >= 0 else ""
+                lines.append(
+                    f"| {label} | {n} | {w} | {hit:.1f}% | {pred:.1f}% | {sign}{delta:.1f}pp |"
+                )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_stale_carryover_block(
     pending: list[dict],
     placer_skips_today: list[dict],

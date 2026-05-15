@@ -1007,3 +1007,65 @@ def test_today_settlements_marks_retired_pick():
     out = render_today_settlements_block(settled, placed_lookup)
     assert "RETIRED" in out
     assert "$0.00" in out
+
+
+# ── render_shadow_cumulative_block ────────────────────────────────────────────
+
+def test_shadow_cumulative_block_empty_log_returns_placeholder():
+    """No outcomes log → friendly placeholder, not a missing section."""
+    from tennis_portfolio import render_shadow_cumulative_block
+    out = render_shadow_cumulative_block([])
+    assert "## Shadow Performance (cumulative)" in out
+    assert "_No resolved shadow outcomes yet._" in out
+
+
+def test_shadow_cumulative_block_aggregates_win_loss_pnl():
+    """Aggregate footer: resolved count (W/L only), wins, win rate %, total PnL.
+    RETIRED is excluded from W/L; mirrors render_shadow_picks_block convention."""
+    from tennis_portfolio import render_shadow_cumulative_block
+    rows = [
+        {"pick_id": "0xa", "status": "WIN", "theoretical_pnl": 7.25, "model_prob": 0.77},
+        {"pick_id": "0xb", "status": "LOSS", "theoretical_pnl": -25.0, "model_prob": 0.72},
+        {"pick_id": "0xc", "status": "WIN", "theoretical_pnl": 9.0, "model_prob": 0.78},
+        {"pick_id": "0xd", "status": "RETIRED", "theoretical_pnl": 0.0, "model_prob": 0.74},
+    ]
+    out = render_shadow_cumulative_block(rows)
+    assert "**Resolved: 3" in out
+    assert "Wins: 2" in out
+    assert "Win rate: 66.7%" in out
+    assert "Theoretical PnL: $-8.75" in out
+
+
+def test_shadow_cumulative_block_renders_prob_buckets():
+    """Bucket the resolved rows into model_prob bins, show hit rate vs predicted."""
+    from tennis_portfolio import render_shadow_cumulative_block
+    rows = [
+        {"pick_id": "0xa", "status": "WIN", "theoretical_pnl": 8.0, "model_prob": 0.72},
+        {"pick_id": "0xb", "status": "LOSS", "theoretical_pnl": -25.0, "model_prob": 0.73},
+        {"pick_id": "0xc", "status": "LOSS", "theoretical_pnl": -25.0, "model_prob": 0.74},
+        {"pick_id": "0xd", "status": "WIN", "theoretical_pnl": 8.0, "model_prob": 0.76},
+        {"pick_id": "0xe", "status": "WIN", "theoretical_pnl": 8.0, "model_prob": 0.78},
+        {"pick_id": "0xf", "status": "LOSS", "theoretical_pnl": -25.0, "model_prob": 0.79},
+    ]
+    out = render_shadow_cumulative_block(rows)
+    assert "### By model-prob bucket" in out
+    assert "0.70–0.75" in out
+    assert "0.75–0.80" in out
+    assert "33.3%" in out
+    assert "66.7%" in out
+
+
+def test_shadow_cumulative_block_dedupes_by_latest_resolved_at():
+    """Two rows for the same pick_id: take the latest resolved_at (status flip
+    from pending → WIN should not double-count)."""
+    from tennis_portfolio import render_shadow_cumulative_block
+    rows = [
+        {"pick_id": "0xa", "status": "pending", "theoretical_pnl": 0.0, "model_prob": 0.77,
+         "resolved_at": "2026-05-08T22:00:00+00:00"},
+        {"pick_id": "0xa", "status": "WIN", "theoretical_pnl": 7.25, "model_prob": 0.77,
+         "resolved_at": "2026-05-09T22:00:00+00:00"},
+    ]
+    out = render_shadow_cumulative_block(rows)
+    assert "**Resolved: 1" in out
+    assert "Wins: 1" in out
+    assert "Theoretical PnL: $+7.25" in out
