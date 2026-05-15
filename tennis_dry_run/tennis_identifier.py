@@ -306,6 +306,59 @@ def prune_stale_pending(
     }
 
 
+def prune_shadow_stale(
+    shadow_file: Path,
+    now_utc: datetime,
+) -> dict:
+    """Prune shadow_selections.jsonl by UTC DATE, not by post-game grace.
+
+    Unlike pending_selections.jsonl (where the placer fires at T-15 and the
+    entry has no downstream reader after game_time + grace), shadow_selections
+    is read by the 22:00 UTC EOD report. A grace-based prune deletes today's
+    completed shadow picks before EOD can resolve them — the 2026-05-11 bug.
+
+    Keeps every entry whose `game_time` falls on today's UTC date; entries
+    without `game_time` are also kept (unknown timing → don't drop).
+
+    Atomic via tempfile + os.replace. Malformed JSON lines dropped silently.
+    """
+    if not shadow_file.exists():
+        return {"kept": 0, "pruned": 0, "pruned_picks": []}
+    today = now_utc.date()
+    kept_lines: list[str] = []
+    pruned_picks: list[str] = []
+    for raw in shadow_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        gt = row.get("game_time")
+        if gt is None:
+            kept_lines.append(line)
+            continue
+        try:
+            gt_dt = datetime.fromtimestamp(float(gt), tz=timezone.utc)
+        except (TypeError, ValueError):
+            kept_lines.append(line)
+            continue
+        if gt_dt.date() == today:
+            kept_lines.append(line)
+        else:
+            pruned_picks.append(row.get("pick", "?"))
+    tmp = shadow_file.with_suffix(shadow_file.suffix + ".tmp")
+    payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, shadow_file)
+    return {
+        "kept": len(kept_lines),
+        "pruned": len(pruned_picks),
+        "pruned_picks": pruned_picks,
+    }
+
+
 def write_daily_report(
     now_utc: datetime,
     counts: dict,
@@ -514,17 +567,29 @@ def main() -> int:
     prune_grace_min = int(os.getenv("PENDING_PRUNE_GRACE_MIN", "60"))
     # shadow_placements.jsonl is an append-only audit log (keyed by ts, not
     # game_time) — don't prune it. It grows ~one line per tier-B pick per day.
-    for label, fpath in (("pending", pending_file), ("shadow", shadow_file)):
-        try:
-            r = prune_stale_pending(fpath, now_utc, grace_minutes=prune_grace_min)
-            if r["pruned"]:
-                log.info(
-                    "Pruned %d stale %s selection(s) (kept=%d): %s",
-                    r["pruned"], label, r["kept"],
-                    ", ".join(r["pruned_picks"]),
-                )
-        except Exception as exc:
-            log.warning("%s prune failed: %s", label, exc)
+    try:
+        r = prune_stale_pending(pending_file, now_utc, grace_minutes=prune_grace_min)
+        if r["pruned"]:
+            log.info(
+                "Pruned %d stale pending selection(s) (kept=%d): %s",
+                r["pruned"], r["kept"], ", ".join(r["pruned_picks"]),
+            )
+    except Exception as exc:
+        log.warning("pending prune failed: %s", exc)
+
+    # Shadow selections use a date-based prune (keep today's UTC date) because
+    # the EOD report at 22:00 UTC needs every tier-B pick from today regardless
+    # of whether the match itself is over. Grace-based pruning would silently
+    # eat today's completed shadow picks (2026-05-11 bug).
+    try:
+        r = prune_shadow_stale(shadow_file, now_utc)
+        if r["pruned"]:
+            log.info(
+                "Pruned %d stale shadow selection(s) (kept=%d): %s",
+                r["pruned"], r["kept"], ", ".join(r["pruned_picks"]),
+            )
+    except Exception as exc:
+        log.warning("shadow prune failed: %s", exc)
 
     sxbet = TennisSXBet()
     try:

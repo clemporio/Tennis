@@ -587,6 +587,131 @@ def test_prune_stale_pending_is_atomic(tmp_path, monkeypatch):
     assert pending.read_bytes() == original_bytes
 
 
+def test_prune_stale_pending_eats_today_shadow_picks_REGRESSION(tmp_path):
+    """REGRESSION: 2026-05-11 bug — identifier's prune (60-min grace) removes
+    today's shadow picks whose match was earlier in the day, so 22:00 UTC EOD
+    sees an empty file and reports 'No shadow picks today' even though tier-B
+    picks fired through the identifier. Documents the broken behaviour;
+    `prune_shadow_stale` (date-based) is the fix.
+    """
+    shadow = tmp_path / "shadow_selections.jsonl"
+    now = datetime(2026, 5, 11, 11, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xnoskova", "pick": "Linda Noskova", "opponent": "Sara Errani",
+         "league": "WTA Rome", "tier": "B",
+         "game_time": _ts(2026, 5, 11, 9, 0)},  # today 09:00 UTC, 2h ago
+        {"pick_id": "0xnakashima", "pick": "Brandon Nakashima", "opponent": "Alex De Minaur",
+         "league": "ATP Rome", "tier": "B",
+         "game_time": _ts(2026, 5, 11, 10, 10)},  # today 10:10 UTC, 50min ago
+    ]
+    _write_pending(shadow, rows)
+
+    ti.prune_stale_pending(shadow, now_utc=now, grace_minutes=60)
+
+    import json
+    surviving = [json.loads(l) for l in shadow.read_text(encoding="utf-8").splitlines() if l.strip()]
+    surviving_ids = {r["pick_id"] for r in surviving}
+    # The bug: today's shadow pick whose match is >60min ago is pruned, even
+    # though EOD at 22:00 UTC still needs it. Nakashima at 10:10 (50min ago)
+    # is within grace and survives this run, but a subsequent identifier run
+    # an hour later would drop him too. By 22:00 UTC EOD both rows are gone.
+    assert "0xnoskova" not in surviving_ids
+    assert "0xnakashima" in surviving_ids
+
+
+# ── prune_shadow_stale ────────────────────────────────────────────────────────
+
+def test_prune_shadow_stale_keeps_all_of_today_regardless_of_game_time(tmp_path):
+    """All entries whose game_time falls on today's UTC date are kept, even if
+    the match itself was hours ago. EOD at 22:00 UTC needs every tier-B pick
+    fired earlier in the day."""
+    shadow = tmp_path / "shadow_selections.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xa", "pick": "Linda Noskova",
+         "game_time": _ts(2026, 5, 11, 9, 0)},   # today, 13h ago → KEEP
+        {"pick_id": "0xb", "pick": "Brandon Nakashima",
+         "game_time": _ts(2026, 5, 11, 10, 10)},  # today, 12h ago → KEEP
+        {"pick_id": "0xc", "pick": "Future Pick",
+         "game_time": _ts(2026, 5, 11, 23, 30)},  # today, future → KEEP
+        {"pick_id": "0xd", "pick": "Yesterday",
+         "game_time": _ts(2026, 5, 10, 14, 0)},   # yesterday → PRUNE
+    ]
+    _write_pending(shadow, rows)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 3
+    assert result["pruned_picks"] == ["Yesterday"]
+
+    import json
+    surviving = [json.loads(l) for l in shadow.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert {r["pick_id"] for r in surviving} == {"0xa", "0xb", "0xc"}
+
+
+def test_prune_shadow_stale_handles_missing_file(tmp_path):
+    """Missing file → no-op (mirrors prune_stale_pending)."""
+    shadow = tmp_path / "does_not_exist.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result == {"kept": 0, "pruned": 0, "pruned_picks": []}
+    assert not shadow.exists()
+
+
+def test_prune_shadow_stale_keeps_entries_without_game_time(tmp_path):
+    """Defensive: unknown timing → don't drop."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [{"pick_id": "0xnogt", "pick": "Mystery"}]
+    _write_pending(shadow, rows)
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["kept"] == 1
+    assert result["pruned"] == 0
+
+
+def test_prune_shadow_stale_skips_malformed_lines(tmp_path):
+    """Malformed JSON dropped silently, valid rows preserved."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    shadow.write_text(
+        '{"pick_id": "0xtoday", "pick": "Today", "game_time": ' + str(_ts(2026, 5, 11, 9)) + '}\n'
+        'not-json\n'
+        '\n'
+        '{"pick_id": "0xyest", "pick": "Yesterday", "game_time": ' + str(_ts(2026, 5, 10, 9)) + '}\n',
+        encoding="utf-8",
+    )
+
+    result = ti.prune_shadow_stale(shadow, now_utc=now)
+
+    assert result["pruned"] == 1
+    assert result["kept"] == 1
+
+
+def test_prune_shadow_stale_is_atomic(tmp_path, monkeypatch):
+    """If os.replace fails, the original file is preserved."""
+    shadow = tmp_path / "shadow.jsonl"
+    now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        {"pick_id": "0xtoday", "pick": "Today", "game_time": _ts(2026, 5, 11, 9)},
+        {"pick_id": "0xyest", "pick": "Yesterday", "game_time": _ts(2026, 5, 10, 9)},
+    ]
+    _write_pending(shadow, rows)
+    original_bytes = shadow.read_bytes()
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr("tennis_identifier.os.replace", boom)
+
+    with pytest.raises(OSError):
+        ti.prune_shadow_stale(shadow, now_utc=now)
+    assert shadow.read_bytes() == original_bytes
+
+
 # ── persist_selection ─────────────────────────────────────────────────────────
 
 def test_persist_selection_appends_jsonl_line(tmp_path):
@@ -691,6 +816,53 @@ def test_identifier_writes_portfolio_block_to_daily_file(tmp_path):
     rolling = rolling_path.read_text(encoding="utf-8")
     assert "## Tennis Dry Run Report" in rolling
     assert "### Portfolio" in rolling
+
+
+# ── main() prune wiring ───────────────────────────────────────────────────────
+
+def test_identifier_main_uses_date_based_prune_for_shadow_file(tmp_path, monkeypatch):
+    """Wiring: main() must invoke prune_shadow_stale (date-based) on the
+    shadow file and prune_stale_pending (grace-based) on the pending file —
+    not the same function for both. Fixes the 2026-05-11 bug where today's
+    completed shadow picks were silently dropped before 22:00 UTC EOD.
+    """
+    import tennis_identifier as ti_mod
+
+    called: list = []
+
+    def fake_prune_shadow_stale(path, now_utc):
+        called.append(("shadow", str(path)))
+        return {"kept": 0, "pruned": 0, "pruned_picks": []}
+
+    real_prune_pending = ti_mod.prune_stale_pending
+    def fake_prune_stale_pending(path, now_utc, grace_minutes=60):
+        called.append(("pending", str(path)))
+        return real_prune_pending(path, now_utc, grace_minutes=grace_minutes)
+
+    class _FakeSX:
+        def __init__(self, *a, **kw): pass
+        def get_all_tennis_markets(self): return []  # triggers early return rc=0
+
+    monkeypatch.setattr(ti_mod, "prune_shadow_stale", fake_prune_shadow_stale)
+    monkeypatch.setattr(ti_mod, "prune_stale_pending", fake_prune_stale_pending)
+    monkeypatch.setattr("tennis_sxbet.TennisSXBet", _FakeSX)
+    monkeypatch.setattr(ti_mod, "STATE_DIR", tmp_path)
+    pending_path = tmp_path / "pending_selections.jsonl"
+    shadow_path = tmp_path / "shadow_selections.jsonl"
+    monkeypatch.setenv("PENDING_SELECTIONS_FILE", str(pending_path))
+    monkeypatch.setenv("SHADOW_SELECTIONS_FILE", str(shadow_path))
+    monkeypatch.setenv("OBSIDIAN_VAULT_DIR", "")
+
+    rc = ti_mod.main()
+    assert rc == 0
+
+    labels = [c[0] for c in called]
+    paths = dict(called)
+    assert labels == ["pending", "shadow"], (
+        f"expected pending then shadow prune, got {labels}"
+    )
+    assert paths["pending"].endswith("pending_selections.jsonl")
+    assert paths["shadow"].endswith("shadow_selections.jsonl")
 
 
 def test_write_daily_report_includes_shadow_section_when_passed(tmp_path):
