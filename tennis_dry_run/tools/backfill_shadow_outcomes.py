@@ -43,23 +43,11 @@ def _stable_pick_id(game_date: date, pick: str, opponent: str) -> str:
     return f"bf_{h[:16]}"
 
 
-def parse_shadow_table(md: str, game_date: date) -> list[dict]:
-    """Extract resolved shadow rows from a daily-report markdown body.
-
-    Returns one dict per row with status in {WIN, LOSS, RETIRED}. Pending rows
-    are skipped. If the report has no shadow section, or has the explicit
-    "No shadow picks today" marker, returns [].
-    """
-    if SHADOW_HEADER not in md:
-        return []
-    start = md.index(SHADOW_HEADER)
-    rest = md[start + len(SHADOW_HEADER):]
-    next_heading = rest.find("\n## ")
-    section = rest if next_heading == -1 else rest[:next_heading]
-
+def _parse_section(section: str, game_date: date) -> list[dict]:
+    """Parse one shadow-picks section body. Returns rows where Outcome ∈
+    {WIN, LOSS, RETIRED}; empty if the section has no Outcome column."""
     if NO_PICKS_MARKER in section:
         return []
-
     header_match = re.search(r"^\s*\|\s*Pick\s*\|.*\|\s*$", section, re.MULTILINE)
     if not header_match:
         return []
@@ -122,6 +110,30 @@ def parse_shadow_table(md: str, game_date: date) -> list[dict]:
             continue
         out.append(row)
     return out
+
+
+def parse_shadow_table(md: str, game_date: date) -> list[dict]:
+    """Extract resolved shadow rows from a daily-report markdown body.
+
+    Real daily reports carry TWO Shadow Picks sections: the BOD one (header
+    only — no Outcome / Theo PnL) and the EOD one (with Outcome / Theo PnL).
+    We walk every occurrence and aggregate, deduping by (pick_id, status) so
+    a section without Outcome is silently skipped while the resolved one
+    contributes rows.
+    """
+    pos = 0
+    aggregated: dict = {}
+    while True:
+        i = md.find(SHADOW_HEADER, pos)
+        if i == -1:
+            break
+        rest = md[i + len(SHADOW_HEADER):]
+        next_heading = rest.find("\n## ")
+        section = rest if next_heading == -1 else rest[:next_heading]
+        for row in _parse_section(section, game_date):
+            aggregated[(row["pick_id"], row["status"])] = row
+        pos = i + len(SHADOW_HEADER)
+    return list(aggregated.values())
 
 
 def backfill_directory(vault_dir: Path, log_file: Path) -> int:
